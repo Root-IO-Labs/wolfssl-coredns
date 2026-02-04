@@ -1,0 +1,12 @@
+# wolfSSL FIPS v5 Password File (NEVER COMMIT THIS)
+wolfssl_password.txt
+
+# Build artifacts
+*.o
+*.so
+*.a
+test-fips
+fips-startup-check
+
+# Docker build cache
+.dockerignore
