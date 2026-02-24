@@ -1,10 +1,10 @@
 # CoreDNS v1.13.2 FIPS-enabled + STIG/CIS Hardened Image (Multi-arch: x86_64 and ARM64)
-# Using golang-fips/go + wolfSSL FIPS v5 + wolfProvider + DISA STIG V2R1 + CIS Level 1 Server
+# Using golang-fips/go + wolfSSL FIPS v5 + wolfProvider + Ubuntu System OpenSSL + DISA STIG V2R1 + CIS Level 1 Server
 #
-# Architecture: CoreDNS (Go) → golang-fips/go → OpenSSL 3 → wolfProvider → wolfSSL FIPS v5
+# Architecture: CoreDNS (Go) → golang-fips/go → Ubuntu System OpenSSL 3 → wolfProvider → wolfSSL FIPS v5
 #
 # MULTI-ARCHITECTURE SUPPORT: ✅ x86_64 (amd64) and ARM64 (aarch64)
-# Build time: ~50-60 minutes (30-40 min for Go toolchain build)
+# Build time: ~30-40 minutes (reduced by 20 min - using Ubuntu System OpenSSL)
 # CRITICAL: NO application code changes required - standard Go crypto/* imports work as-is
 #
 # Build command (single arch):
@@ -19,45 +19,7 @@
 #   docker run --rm -p 53:53/udp -p 53:53/tcp coredns-fips:v1.13.2-ubuntu-22.04
 
 # ============================================================================
-# Stage 1: Build OpenSSL 3 with FIPS module
-# ============================================================================
-FROM ubuntu:22.04 AS openssl-builder
-
-ENV DEBIAN_FRONTEND=noninteractive
-
-# OpenSSL Configuration
-ENV OPENSSL_VERSION=3.0.18
-ENV OPENSSL_PREFIX=/usr/local/openssl
-
-RUN set -eux; \
-    apt-get update; \
-    apt-get install -y --no-install-recommends \
-        build-essential \
-        ca-certificates \
-        curl \
-        perl \
-    ; \
-    rm -rf /var/lib/apt/lists/*
-
-# Build OpenSSL 3 with FIPS module (Multi-arch: x86_64 and ARM64)
-RUN set -eux; \
-    cd /tmp; \
-    curl -fsSL "https://www.openssl.org/source/openssl-${OPENSSL_VERSION}.tar.gz" -o openssl.tar.gz; \
-    tar -xzf openssl.tar.gz; \
-    cd "openssl-${OPENSSL_VERSION}"; \
-    ARCH=$(uname -m); \
-    if [ "$ARCH" = "x86_64" ]; then OPENSSL_TARGET="linux-x86_64"; OPENSSL_LIBDIR="lib64"; \
-    elif [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then OPENSSL_TARGET="linux-aarch64"; OPENSSL_LIBDIR="lib"; \
-    else OPENSSL_TARGET="linux-generic64"; OPENSSL_LIBDIR="lib"; fi; \
-    ./Configure --prefix=${OPENSSL_PREFIX} --libdir=$OPENSSL_LIBDIR --openssldir=${OPENSSL_PREFIX}/ssl enable-fips shared $OPENSSL_TARGET; \
-    make -j"$(nproc)"; \
-    make install_sw install_fips install_ssldirs; \
-    if [ -d "${OPENSSL_PREFIX}/lib64" ] && [ ! -d "${OPENSSL_PREFIX}/lib" ]; then ln -sf lib64 ${OPENSSL_PREFIX}/lib; \
-    elif [ -d "${OPENSSL_PREFIX}/lib" ] && [ ! -d "${OPENSSL_PREFIX}/lib64" ]; then ln -sf lib ${OPENSSL_PREFIX}/lib64; fi; \
-    cd /tmp; rm -rf openssl*
-
-# ============================================================================
-# Stage 2: Build wolfSSL FIPS v5
+# Stage 1: Build wolfSSL FIPS v5
 # ============================================================================
 FROM ubuntu:22.04 AS wolfssl-builder
 
@@ -86,15 +48,14 @@ RUN set -eux; \
 RUN --mount=type=secret,id=wolfssl_password,required=true \
     set -eux; \
     mkdir -p /usr/src; \
-    curl -fsSLk "${WOLFSSL_URL}" -o /tmp/wolfssl.7z; \
+    curl -fsSL "${WOLFSSL_URL}" -o /tmp/wolfssl.7z; \
     PASSWORD=$(cat /run/secrets/wolfssl_password | tr -d '\n\r'); \
     7z x /tmp/wolfssl.7z -o/usr/src -p"${PASSWORD}"; \
     rm /tmp/wolfssl.7z; \
     find /usr/src -maxdepth 1 -type d -name "wolfssl*" -exec mv {} /usr/src/wolfssl \;; \
     cd /usr/src/wolfssl; \
-    # Remove Python-specific defines that can cause issues
-    sed -i '/^#ifdef WOLFSSL_PYTHON/,/^#endif/d' wolfssl/wolfcrypt/settings.h || true; \
     # Configure wolfSSL with FIPS v5 and necessary features
+    # NOTE: Do NOT patch settings.h - it would invalidate FIPS certificate
     ./configure \
         --prefix=${WOLFSSL_PREFIX} \
         --enable-fips=v5 \
@@ -102,7 +63,6 @@ RUN --mount=type=secret,id=wolfssl_password,required=true \
         --enable-cmac \
         --enable-keygen \
         --enable-sha \
-        --enable-des3 \
         --enable-aesctr \
         --enable-aesccm \
         --enable-x963kdf \
@@ -112,7 +72,7 @@ RUN --mount=type=secret,id=wolfssl_password,required=true \
         --enable-enckeys \
         --enable-base16 \
         --with-eccminsz=192 \
-        CPPFLAGS="-DHAVE_AES_ECB -DWOLFSSL_AES_DIRECT -DWC_RSA_NO_PADDING -DWOLFSSL_PUBLIC_MP -DHAVE_PUBLIC_FFDHE -DWOLFSSL_DH_EXTRA -DWOLFSSL_PSS_LONG_SALT -DWOLFSSL_PSS_SALT_LEN_DISCOVER -DRSA_MIN_SIZE=1024" \
+        CPPFLAGS="-DHAVE_AES_ECB -DWOLFSSL_AES_DIRECT -DWC_RSA_NO_PADDING -DWOLFSSL_PUBLIC_MP -DHAVE_PUBLIC_FFDHE -DWOLFSSL_DH_EXTRA -DWOLFSSL_PSS_LONG_SALT -DWOLFSSL_PSS_SALT_LEN_DISCOVER -DRSA_MIN_SIZE=2048" \
     ; \
     make -j"$(nproc)"; \
     ./fips-hash.sh; \
@@ -133,7 +93,7 @@ RUN set -eux; \
     echo "FIPS startup check utility built successfully"
 
 # ============================================================================
-# Stage 3: Build wolfProvider
+# Stage 2: Build wolfProvider (using Ubuntu System OpenSSL)
 # ============================================================================
 FROM ubuntu:22.04 AS wolfprov-builder
 
@@ -143,11 +103,9 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV WOLFPROV_VERSION=v1.1.0
 ENV WOLFPROV_REPO=https://github.com/wolfSSL/wolfProvider.git
 ENV WOLFPROV_PREFIX=/usr/local
-ENV OPENSSL_PREFIX=/usr/local/openssl
 ENV WOLFSSL_PREFIX=/usr/local
 
-# Copy OpenSSL and wolfSSL from previous stages
-COPY --from=openssl-builder ${OPENSSL_PREFIX} ${OPENSSL_PREFIX}
+# Copy wolfSSL from previous stage
 COPY --from=wolfssl-builder ${WOLFSSL_PREFIX}/include/wolfssl ${WOLFSSL_PREFIX}/include/wolfssl
 COPY --from=wolfssl-builder ${WOLFSSL_PREFIX}/lib/libwolfssl.* ${WOLFSSL_PREFIX}/lib/
 
@@ -161,32 +119,42 @@ RUN set -eux; \
         automake \
         libtool \
         pkg-config \
+        libssl-dev \
     ; \
     rm -rf /var/lib/apt/lists/*
 
-# Set up library paths (Multi-arch: lib and lib64)
-ENV LD_LIBRARY_PATH="${OPENSSL_PREFIX}/lib64:${OPENSSL_PREFIX}/lib:${WOLFSSL_PREFIX}/lib"
-ENV PKG_CONFIG_PATH="${OPENSSL_PREFIX}/lib64/pkgconfig:${OPENSSL_PREFIX}/lib/pkgconfig:${WOLFSSL_PREFIX}/lib/pkgconfig"
+# Set up library paths
+ENV LD_LIBRARY_PATH="${WOLFSSL_PREFIX}/lib"
+ENV PKG_CONFIG_PATH="${WOLFSSL_PREFIX}/lib/pkgconfig"
 
-# Build wolfProvider
+# Build wolfProvider with Ubuntu System OpenSSL
 RUN set -eux; \
     cd /tmp; \
     git clone --depth 1 --branch ${WOLFPROV_VERSION} ${WOLFPROV_REPO} wolfProvider; \
     cd wolfProvider; \
     ./autogen.sh; \
+    # Detect architecture for multi-arch support
+    ARCH=$(uname -m); \
+    if [ "$ARCH" = "x86_64" ]; then MULTIARCH="x86_64-linux-gnu"; \
+    elif [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then MULTIARCH="aarch64-linux-gnu"; \
+    else MULTIARCH="x86_64-linux-gnu"; fi; \
+    echo "Building wolfProvider for $ARCH (multiarch: $MULTIARCH)"; \
     ./configure \
         --prefix=${WOLFPROV_PREFIX} \
-        --with-openssl=${OPENSSL_PREFIX} \
+        --with-openssl=/usr \
         --with-wolfssl=${WOLFSSL_PREFIX} \
+        CPPFLAGS="-I/usr/include" \
+        LDFLAGS="-L/usr/lib/${MULTIARCH}" \
     ; \
     make -j"$(nproc)"; \
-    make install; \
+    # Install to Ubuntu system modules directory
+    mkdir -p /usr/lib/${MULTIARCH}/ossl-modules; \
+    cp -v .libs/libwolfprov.so* /usr/lib/${MULTIARCH}/ossl-modules/; \
     echo "Checking installed wolfProvider files:"; \
-    find ${WOLFPROV_PREFIX} -name "libwolfprov.so*" -ls || echo "wolfProvider not in expected location"; \
-    find ${OPENSSL_PREFIX} -name "libwolfprov.so*" -ls || echo "wolfProvider not in OpenSSL location"
+    ls -lah /usr/lib/${MULTIARCH}/ossl-modules/
 
 # ============================================================================
-# Stage 4: Build golang-fips/go toolchain
+# Stage 3: Build golang-fips/go toolchain (using Ubuntu System OpenSSL)
 # ============================================================================
 FROM ubuntu:22.04 AS go-builder
 
@@ -197,14 +165,27 @@ ENV GOLANG_FIPS_VERSION=go1.24-fips-release
 ENV GOLANG_FIPS_REPO=https://github.com/golang-fips/go.git
 ENV GOROOT_BOOTSTRAP=/usr/local/go-bootstrap
 ENV GOROOT=/usr/local/go-fips
-ENV OPENSSL_PREFIX=/usr/local/openssl
 ENV WOLFSSL_PREFIX=/usr/local
 
-# Copy OpenSSL, wolfSSL, and wolfProvider from previous stages
-COPY --from=openssl-builder ${OPENSSL_PREFIX} ${OPENSSL_PREFIX}
+# Copy wolfSSL and wolfProvider from previous stages
 COPY --from=wolfssl-builder ${WOLFSSL_PREFIX}/include/wolfssl ${WOLFSSL_PREFIX}/include/wolfssl
 COPY --from=wolfssl-builder ${WOLFSSL_PREFIX}/lib/libwolfssl.* ${WOLFSSL_PREFIX}/lib/
-COPY --from=wolfprov-builder ${OPENSSL_PREFIX}/lib64/ossl-modules/libwolfprov.so* ${OPENSSL_PREFIX}/lib64/ossl-modules/
+
+# Copy wolfProvider to Ubuntu system location (using bind mount for conditional copy)
+RUN --mount=type=bind,from=wolfprov-builder,source=/usr/lib,target=/mnt/wolfprov-lib \
+    set -eux; \
+    ARCH=$(uname -m); \
+    if [ "$ARCH" = "x86_64" ]; then MULTIARCH="x86_64-linux-gnu"; \
+    elif [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then MULTIARCH="aarch64-linux-gnu"; \
+    else MULTIARCH="x86_64-linux-gnu"; fi; \
+    echo "Copying wolfProvider for architecture: $ARCH"; \
+    mkdir -p /usr/lib/${MULTIARCH}/ossl-modules; \
+    if [ -d "/mnt/wolfprov-lib/${MULTIARCH}/ossl-modules" ]; then \
+        cp -v /mnt/wolfprov-lib/${MULTIARCH}/ossl-modules/libwolfprov.so* /usr/lib/${MULTIARCH}/ossl-modules/; \
+    else \
+        echo "ERROR: wolfProvider not found"; \
+        exit 1; \
+    fi
 
 RUN set -eux; \
     apt-get update; \
@@ -214,6 +195,7 @@ RUN set -eux; \
         git \
         curl \
         pkg-config \
+        libssl-dev \
     ; \
     rm -rf /var/lib/apt/lists/*
 
@@ -227,13 +209,37 @@ RUN set -eux; \
     mv /usr/local/go ${GOROOT_BOOTSTRAP}; \
     rm /tmp/go.tar.gz
 
-# Set up library paths (Multi-arch: lib and lib64)
-ENV LD_LIBRARY_PATH="${OPENSSL_PREFIX}/lib64:${OPENSSL_PREFIX}/lib:${WOLFSSL_PREFIX}/lib"
-ENV PKG_CONFIG_PATH="${OPENSSL_PREFIX}/lib64/pkgconfig:${OPENSSL_PREFIX}/lib/pkgconfig:${WOLFSSL_PREFIX}/lib/pkgconfig"
+# Set up library paths
+ENV LD_LIBRARY_PATH="${WOLFSSL_PREFIX}/lib"
+ENV PKG_CONFIG_PATH="${WOLFSSL_PREFIX}/lib/pkgconfig"
 
-# Build golang-fips/go from source
+# Copy OpenSSL configuration (same for build and runtime - FIPS-only mode)
+COPY openssl-wolfprov.cnf /tmp/openssl-wolfprov.cnf
+
+# Copy FIPS compliance patch for golang-fips/go
+COPY golang-fips-remove-tls13-chacha20.patch /tmp/golang-fips-remove-tls13-chacha20.patch
+
+# Configure OpenSSL for FIPS-only mode (same config for build and runtime)
+RUN set -eux; \
+    ARCH=$(uname -m); \
+    if [ "$ARCH" = "x86_64" ]; then MULTIARCH="x86_64-linux-gnu"; \
+    elif [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then MULTIARCH="aarch64-linux-gnu"; \
+    else MULTIARCH="x86_64-linux-gnu"; fi; \
+    echo "Configuring OpenSSL FIPS-only mode (architecture: $ARCH)"; \
+    sed "s|/usr/lib/x86_64-linux-gnu/|/usr/lib/${MULTIARCH}/|g" /tmp/openssl-wolfprov.cnf > /etc/ssl/openssl.cnf
+
+# Set OpenSSL configuration path
+ENV OPENSSL_CONF=/etc/ssl/openssl.cnf
+
+# Build golang-fips/go from source with Ubuntu System OpenSSL
 # Note: golang-fips/go uses a meta-repository with git submodules and patches
 RUN set -eux; \
+    # Detect architecture for multi-arch support
+    ARCH=$(uname -m); \
+    if [ "$ARCH" = "x86_64" ]; then MULTIARCH="x86_64-linux-gnu"; \
+    elif [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then MULTIARCH="aarch64-linux-gnu"; \
+    else MULTIARCH="x86_64-linux-gnu"; fi; \
+    echo "Building golang-fips/go for $ARCH (multiarch: $MULTIARCH)"; \
     unset GOROOT; \
     export PATH="${GOROOT_BOOTSTRAP}/bin:${PATH}"; \
     git config --global user.email "builder@fips.local"; \
@@ -243,10 +249,20 @@ RUN set -eux; \
     git submodule update --init --recursive; \
     cd /tmp/go-fips-repo; \
     ./scripts/full-initialize-repo.sh; \
+    echo "Applying FIPS compliance fix: Removing ChaCha20 from TLS 1.3 cipher suites"; \
+    cd /tmp/go-fips-repo/go; \
+    CIPHER_FILE="src/crypto/tls/cipher_suites.go"; \
+    if grep -q "TLS_CHACHA20_POLY1305_SHA256.*aeadChaCha20Poly1305" "$CIPHER_FILE"; then \
+        echo "Found ChaCha20 cipher suite, removing it..."; \
+        sed -i '/TLS_CHACHA20_POLY1305_SHA256.*aeadChaCha20Poly1305/d' "$CIPHER_FILE"; \
+        echo "ChaCha20 cipher suite removed successfully"; \
+    else \
+        echo "WARNING: ChaCha20 cipher suite not found in expected format"; \
+    fi; \
     cd /tmp/go-fips-repo/go/src; \
     CGO_ENABLED=1 \
-    CGO_CFLAGS="-I${OPENSSL_PREFIX}/include -I${WOLFSSL_PREFIX}/include" \
-    CGO_LDFLAGS="-L${OPENSSL_PREFIX}/lib64 -L${OPENSSL_PREFIX}/lib -L${WOLFSSL_PREFIX}/lib" \
+    CGO_CFLAGS="-I/usr/include -I${WOLFSSL_PREFIX}/include" \
+    CGO_LDFLAGS="-L/usr/lib/${MULTIARCH} -L${WOLFSSL_PREFIX}/lib" \
     ./make.bash; \
     FINAL_GOROOT=/usr/local/go-fips; \
     mv /tmp/go-fips-repo/go ${FINAL_GOROOT}; \
@@ -301,22 +317,35 @@ RUN set -eux; \
     echo ""
 
 # ============================================================================
-# Stage 5: Build CoreDNS v1.13.2
+# Stage 4: Build CoreDNS v1.13.2 (using Ubuntu System OpenSSL)
 # ============================================================================
 FROM ubuntu:22.04 AS app-builder
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV GOROOT=/usr/local/go-fips
 ENV PATH="${GOROOT}/bin:${PATH}"
-ENV OPENSSL_PREFIX=/usr/local/openssl
 ENV WOLFSSL_PREFIX=/usr/local
 
 # Copy Go toolchain and libraries
 COPY --from=go-builder ${GOROOT} ${GOROOT}
-COPY --from=openssl-builder ${OPENSSL_PREFIX} ${OPENSSL_PREFIX}
 COPY --from=wolfssl-builder ${WOLFSSL_PREFIX}/include/wolfssl ${WOLFSSL_PREFIX}/include/wolfssl
 COPY --from=wolfssl-builder ${WOLFSSL_PREFIX}/lib/libwolfssl.* ${WOLFSSL_PREFIX}/lib/
-COPY --from=wolfprov-builder ${OPENSSL_PREFIX}/lib64/ossl-modules/libwolfprov.so* ${OPENSSL_PREFIX}/lib64/ossl-modules/
+
+# Copy wolfProvider to Ubuntu system location (using bind mount for conditional copy)
+RUN --mount=type=bind,from=wolfprov-builder,source=/usr/lib,target=/mnt/wolfprov-lib \
+    set -eux; \
+    ARCH=$(uname -m); \
+    if [ "$ARCH" = "x86_64" ]; then MULTIARCH="x86_64-linux-gnu"; \
+    elif [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then MULTIARCH="aarch64-linux-gnu"; \
+    else MULTIARCH="x86_64-linux-gnu"; fi; \
+    echo "Copying wolfProvider for architecture: $ARCH"; \
+    mkdir -p /usr/lib/${MULTIARCH}/ossl-modules; \
+    if [ -d "/mnt/wolfprov-lib/${MULTIARCH}/ossl-modules" ]; then \
+        cp -v /mnt/wolfprov-lib/${MULTIARCH}/ossl-modules/libwolfprov.so* /usr/lib/${MULTIARCH}/ossl-modules/; \
+    else \
+        echo "ERROR: wolfProvider not found"; \
+        exit 1; \
+    fi
 
 RUN set -eux; \
     apt-get update; \
@@ -326,32 +355,62 @@ RUN set -eux; \
         curl \
         git \
         pkg-config \
+        libssl-dev \
     ; \
     rm -rf /var/lib/apt/lists/*
 
-# Set up library paths (Multi-arch: lib and lib64)
-ENV LD_LIBRARY_PATH="${OPENSSL_PREFIX}/lib64:${OPENSSL_PREFIX}/lib:${WOLFSSL_PREFIX}/lib"
-ENV PKG_CONFIG_PATH="${OPENSSL_PREFIX}/lib64/pkgconfig:${OPENSSL_PREFIX}/lib/pkgconfig:${WOLFSSL_PREFIX}/lib/pkgconfig"
+# Set up library paths for Ubuntu System OpenSSL and wolfSSL
+ENV LD_LIBRARY_PATH="${WOLFSSL_PREFIX}/lib"
+ENV PKG_CONFIG_PATH="${WOLFSSL_PREFIX}/lib/pkgconfig"
 
 # Build configuration for FIPS
 ENV CGO_ENABLED=1
-ENV CGO_CFLAGS="-I${OPENSSL_PREFIX}/include -I${WOLFSSL_PREFIX}/include"
-ENV CGO_LDFLAGS="-L${OPENSSL_PREFIX}/lib64 -L${OPENSSL_PREFIX}/lib -L${WOLFSSL_PREFIX}/lib"
+# Note: CGO flags will be set dynamically in build command for multi-arch support
+
+# CRITICAL: Enable FIPS mode for golang-fips/go
+# This environment variable tells golang-fips/go to enforce FIPS mode at runtime
+ENV GOLANG_FIPS=1
+
+# Copy OpenSSL configuration (same for build and runtime - FIPS-only mode)
+COPY openssl-wolfprov.cnf /tmp/openssl-wolfprov.cnf
+
+# Configure OpenSSL for FIPS-only mode (same config for build and runtime)
+RUN set -eux; \
+    ARCH=$(uname -m); \
+    if [ "$ARCH" = "x86_64" ]; then MULTIARCH="x86_64-linux-gnu"; \
+    elif [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then MULTIARCH="aarch64-linux-gnu"; \
+    else MULTIARCH="x86_64-linux-gnu"; fi; \
+    echo "Configuring OpenSSL FIPS-only mode (architecture: $ARCH)"; \
+    sed "s|/usr/lib/x86_64-linux-gnu/|/usr/lib/${MULTIARCH}/|g" /tmp/openssl-wolfprov.cnf > /etc/ssl/openssl.cnf
+
+# Set OpenSSL configuration path (for go mod tidy and CoreDNS build)
+ENV OPENSSL_CONF=/etc/ssl/openssl.cnf
 
 # Clone and build CoreDNS v1.13.2
 RUN set -eux; \
+    # Detect architecture for multi-arch support
+    ARCH=$(uname -m); \
+    if [ "$ARCH" = "x86_64" ]; then MULTIARCH="x86_64-linux-gnu"; \
+    elif [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then MULTIARCH="aarch64-linux-gnu"; \
+    else MULTIARCH="x86_64-linux-gnu"; fi; \
+    echo "Building for architecture: $ARCH (multiarch: $MULTIARCH)"; \
     echo "Cloning CoreDNS repository..."; \
     git clone --depth 1 --branch v1.13.2 \
         https://github.com/coredns/coredns.git /tmp/coredns; \
     cd /tmp/coredns; \
     echo "Updating expr-lang/expr dependency to v1.17.7..."; \
     sed -i 's|github.com/expr-lang/expr v1.17.6|github.com/expr-lang/expr v1.17.7|g' go.mod; \
+    echo "Disabling FIPS mode for build (will be enabled at runtime)..."; \
+    unset GOLANG_FIPS; \
     go mod tidy; \
     echo "Building CoreDNS v1.13.2 with FIPS Go..."; \
     go version; \
     echo "Downloading dependencies..."; \
     go mod download; \
-    echo "Building CoreDNS binary..."; \
+    echo "Building CoreDNS binary with Ubuntu System OpenSSL..."; \
+    CGO_ENABLED=1 \
+    CGO_CFLAGS="-I/usr/include -I${WOLFSSL_PREFIX}/include" \
+    CGO_LDFLAGS="-L/usr/lib/${MULTIARCH} -L${WOLFSSL_PREFIX}/lib" \
     go build -buildmode=pie \
         -ldflags="-s -w" \
         -o /app/coredns \
@@ -388,7 +447,7 @@ RUN set -eux; \
         echo ""; \
         echo "FIPS Compliance Path:"; \
         echo "  CoreDNS → golang.org/x/crypto → golang-fips/go runtime"; \
-        echo "  → OpenSSL 3.0.15 → wolfProvider → wolfSSL FIPS v5"; \
+        echo "  → Ubuntu System OpenSSL 3.0.2 → wolfProvider v1.1.0 → wolfSSL FIPS v5.8.2"; \
         echo ""; \
         echo "⚠️  Action Required:"; \
         echo "  Integration testing with TLS connections (DoT/DoH/DoH3) to verify"; \
@@ -409,7 +468,7 @@ RUN set -eux; \
         echo ""; \
         echo "Expected Behavior:"; \
         echo "  golang-fips/go routes crypto/ecdh and crypto/tls calls to OpenSSL"; \
-        echo "  OpenSSL 3.0.15 uses wolfProvider → wolfSSL FIPS v5 for operations"; \
+        echo "  Ubuntu System OpenSSL 3.0.2 uses wolfProvider v1.1.0 → wolfSSL FIPS v5.8.2 for operations"; \
         echo ""; \
         echo "⚠️  Action Required:"; \
         echo "  Test TLS connections in production environment"; \
@@ -436,23 +495,39 @@ RUN set -eux; \
     else \
         echo "ℹ️  No Ed25519 references found"; \
     fi; \
-    # Check for ChaCha20 (stream cipher)
+    # Check for ChaCha20 (stream cipher) - CRITICAL FOR FIPS
     CHACHA20_COUNT=$(strings /app/coredns 2>/dev/null | grep -ic "chacha20" || echo 0); \
     if [ "$CHACHA20_COUNT" -gt 0 ]; then \
-        echo "⚠️  WARNING: Found $CHACHA20_COUNT ChaCha20 references"; \
+        echo "⚠️  CRITICAL: Found $CHACHA20_COUNT ChaCha20 references"; \
         echo ""; \
         echo "Details:"; \
         echo "  Algorithm: ChaCha20-Poly1305 AEAD cipher"; \
-        echo "  Used in: TLS 1.3 cipher suites (optional)"; \
-        echo "  FIPS Status: NOT FIPS-approved"; \
+        echo "  Source: golang.org/x/crypto/chacha20poly1305 (vendored in Go TLS)"; \
+        echo "  Used in: TLS 1.3 cipher suites (RFC 8439)"; \
+        echo "  FIPS Status: NOT FIPS 140-3 approved"; \
         echo ""; \
-        echo "⚠️  Action Required:"; \
-        echo "  Configure TLS to use only FIPS-approved cipher suites"; \
-        echo "  Example: AES-128-GCM-SHA256, AES-256-GCM-SHA384"; \
-        echo "  Disable ChaCha20-Poly1305 in TLS configuration"; \
+        echo "FIPS Compliance Strategy:"; \
+        echo "  ✅ golang-fips/go intercepts crypto/* calls at RUNTIME"; \
+        echo "  ✅ GOLANG_FIPS=1 enforces FIPS mode"; \
+        echo "  ✅ default_properties=fips=yes in openssl.cnf"; \
+        echo "  ✅ Provider named 'fips' for golang-fips discovery"; \
         echo ""; \
+        echo "What happens at runtime:"; \
+        echo "  1. CoreDNS calls crypto/tls for TLS connection"; \
+        echo "  2. golang-fips/go intercepts and routes to OpenSSL"; \
+        echo "  3. OpenSSL with 'fips' provider only allows FIPS algorithms"; \
+        echo "  4. ChaCha20 cipher suite will be REJECTED by FIPS provider"; \
+        echo "  5. TLS handshake falls back to FIPS-approved ciphers (AES-GCM)"; \
+        echo ""; \
+        echo "⚠️  Production Requirements:"; \
+        echo "  1. Test TLS connections with FIPS enforcement"; \
+        echo "  2. Verify only FIPS cipher suites are negotiated"; \
+        echo "  3. Monitor: openssl s_client -connect <host>:<port> -cipher 'FIPS'"; \
+        echo "  4. Expected ciphers: TLS_AES_128_GCM_SHA256, TLS_AES_256_GCM_SHA384"; \
+        echo ""; \
+        echo "Note: ChaCha20 code is compiled but WILL NOT BE USED due to FIPS enforcement"; \
     else \
-        echo "✓ No ChaCha20 references found"; \
+        echo "✓ No ChaCha20 references found (ideal for FIPS)"; \
     fi; \
     echo ""; \
     echo "Summary:"; \
@@ -472,13 +547,15 @@ RUN set -eux; \
     echo ""
 
 # ============================================================================
-# Stage 6: Runtime image
+# Stage 5: Runtime image (Ubuntu System OpenSSL)
 # ============================================================================
 FROM ubuntu:22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
-ENV OPENSSL_PREFIX=/usr/local/openssl
 ENV WOLFSSL_PREFIX=/usr/local
+
+# CRITICAL: Enable FIPS mode for golang-fips/go at runtime
+ENV GOLANG_FIPS=1
 
 # ============================================================================
 # CRITICAL: Installation Order for FIPS Compliance
@@ -488,65 +565,83 @@ ENV WOLFSSL_PREFIX=/usr/local
 # ----------------------------------------------------------------------------
 # Step 1: Copy FIPS Components BEFORE apt-get (CRITICAL)
 # ----------------------------------------------------------------------------
-COPY --from=openssl-builder ${OPENSSL_PREFIX} ${OPENSSL_PREFIX}
+# Copy wolfSSL FIPS library
 COPY --from=wolfssl-builder ${WOLFSSL_PREFIX}/lib/libwolfssl.* ${WOLFSSL_PREFIX}/lib/
 COPY --from=wolfssl-builder ${WOLFSSL_PREFIX}/include/wolfssl ${WOLFSSL_PREFIX}/include/wolfssl
 
-# Create OpenSSL modules directory
-RUN mkdir -p ${OPENSSL_PREFIX}/lib64/ossl-modules
+# Detect architecture and create system OpenSSL modules directory
+RUN set -eux; \
+    ARCH=$(uname -m); \
+    if [ "$ARCH" = "x86_64" ]; then MULTIARCH="x86_64-linux-gnu"; \
+    elif [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then MULTIARCH="aarch64-linux-gnu"; \
+    else echo "ERROR: Unsupported architecture $ARCH"; exit 1; fi; \
+    echo "Creating OpenSSL modules directory for $ARCH"; \
+    mkdir -p /usr/lib/${MULTIARCH}/ossl-modules
 
-# Copy wolfProvider
-RUN --mount=type=bind,from=wolfprov-builder,source=/usr/local,target=/mnt/wolfprov \
+# Copy wolfProvider to Ubuntu system location (using bind mount for conditional copy)
+RUN --mount=type=bind,from=wolfprov-builder,source=/usr/lib,target=/mnt/wolfprov-lib \
     set -eux; \
-    echo "Searching for wolfProvider..."; \
-    find /mnt/wolfprov -name "libwolfprov.so*" -ls || true; \
-    if [ -f "/mnt/wolfprov/lib/libwolfprov.so" ]; then \
-        echo "Copying wolfProvider from /usr/local/lib/"; \
-        cp -v /mnt/wolfprov/lib/libwolfprov.so* ${OPENSSL_PREFIX}/lib64/ossl-modules/; \
-        echo "Creating symlink without lib prefix for OpenSSL compatibility..."; \
-        ln -sf libwolfprov.so ${OPENSSL_PREFIX}/lib64/ossl-modules/wolfprov.so; \
+    ARCH=$(uname -m); \
+    if [ "$ARCH" = "x86_64" ]; then MULTIARCH="x86_64-linux-gnu"; \
+    elif [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then MULTIARCH="aarch64-linux-gnu"; \
+    else MULTIARCH="x86_64-linux-gnu"; fi; \
+    echo "Copying wolfProvider for architecture: $ARCH (multiarch: $MULTIARCH)"; \
+    mkdir -p /usr/lib/${MULTIARCH}/ossl-modules; \
+    if [ -d "/mnt/wolfprov-lib/${MULTIARCH}/ossl-modules" ]; then \
+        cp -v /mnt/wolfprov-lib/${MULTIARCH}/ossl-modules/libwolfprov.so* /usr/lib/${MULTIARCH}/ossl-modules/; \
     else \
-        echo "ERROR: wolfProvider not found!"; \
+        echo "ERROR: wolfProvider not found in /mnt/wolfprov-lib/${MULTIARCH}/ossl-modules/"; \
         exit 1; \
     fi; \
-    echo "Final wolfProvider verification:"; \
-    ls -la ${OPENSSL_PREFIX}/lib64/ossl-modules/
+    echo "Verifying wolfProvider installation:"; \
+    ls -la /usr/lib/${MULTIARCH}/ossl-modules/; \
+    if [ ! -f "/usr/lib/${MULTIARCH}/ossl-modules/libwolfprov.so" ]; then \
+        echo "ERROR: wolfProvider not found!"; \
+        exit 1; \
+    fi
 
 # ----------------------------------------------------------------------------
-# Step 2: Install FIPS OpenSSL to System Locations (CRITICAL)
-# This ensures apt-get packages link to FIPS OpenSSL, not Ubuntu's OpenSSL
+# Step 2: Install Ubuntu System OpenSSL (from APT repositories)
 # ----------------------------------------------------------------------------
 RUN set -eux; \
-    echo "Installing FIPS OpenSSL to system locations..."; \
-    # Copy FIPS OpenSSL libraries to standard system location
-    cp -av ${OPENSSL_PREFIX}/lib64/libssl.so* /usr/lib/x86_64-linux-gnu/ || true; \
-    cp -av ${OPENSSL_PREFIX}/lib64/libcrypto.so* /usr/lib/x86_64-linux-gnu/ || true; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+        libssl3 \
+        openssl \
+        ca-certificates \
+    ; \
+    rm -rf /var/lib/apt/lists/*; \
+    echo "Ubuntu System OpenSSL installed"
+
+# ----------------------------------------------------------------------------
+# Step 3: Configure wolfSSL in system library path
+# ----------------------------------------------------------------------------
+RUN set -eux; \
+    echo "Installing wolfSSL to system locations..."; \
+    # Detect architecture and set multiarch path dynamically
+    ARCH=$(uname -m); \
+    if [ "$ARCH" = "x86_64" ]; then MULTIARCH="x86_64-linux-gnu"; \
+    elif [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then MULTIARCH="aarch64-linux-gnu"; \
+    else echo "ERROR: Unsupported architecture $ARCH"; exit 1; fi; \
+    echo "Detected architecture: $ARCH, multiarch: $MULTIARCH"; \
     # Copy wolfSSL libraries to system location
-    cp -av ${WOLFSSL_PREFIX}/lib/libwolfssl.so* /usr/lib/x86_64-linux-gnu/ || true; \
+    cp -av ${WOLFSSL_PREFIX}/lib/libwolfssl.so* /usr/lib/${MULTIARCH}/ || true; \
     # Create dynamic linker configuration
-    echo "${OPENSSL_PREFIX}/lib64" > /etc/ld.so.conf.d/fips-openssl.conf; \
-    echo "${WOLFSSL_PREFIX}/lib" >> /etc/ld.so.conf.d/fips-openssl.conf; \
-    echo "/usr/lib/x86_64-linux-gnu" >> /etc/ld.so.conf.d/fips-openssl.conf; \
+    echo "${WOLFSSL_PREFIX}/lib" > /etc/ld.so.conf.d/fips-wolfssl.conf; \
+    echo "/usr/lib/${MULTIARCH}" >> /etc/ld.so.conf.d/fips-wolfssl.conf; \
     # Update dynamic linker cache
     ldconfig; \
-    echo "FIPS OpenSSL installed to system locations"
-
-# Copy OpenSSL binary to system location
-RUN set -eux; \
-    cp -av ${OPENSSL_PREFIX}/bin/openssl /usr/bin/openssl || true; \
-    chmod 755 /usr/bin/openssl
+    echo "wolfSSL installed to system locations"
 
 # Copy OpenSSL configuration with wolfProvider settings (MUST BE BEFORE VERIFICATION)
-COPY openssl-wolfprov.cnf ${OPENSSL_PREFIX}/ssl/openssl.cnf
+COPY openssl-wolfprov.cnf /etc/ssl/openssl.cnf
 
 # Set environment variables for FIPS mode (REQUIRED for verification to work)
-ENV PATH="${OPENSSL_PREFIX}/bin:${PATH}"
-ENV LD_LIBRARY_PATH="${OPENSSL_PREFIX}/lib64:${OPENSSL_PREFIX}/lib:${WOLFSSL_PREFIX}/lib:/usr/lib/x86_64-linux-gnu:/usr/lib/aarch64-linux-gnu:/usr/lib"
-ENV OPENSSL_CONF="${OPENSSL_PREFIX}/ssl/openssl.cnf"
-ENV OPENSSL_MODULES="${OPENSSL_PREFIX}/lib64/ossl-modules"
+ENV LD_LIBRARY_PATH="${WOLFSSL_PREFIX}/lib:/usr/lib/x86_64-linux-gnu:/usr/lib/aarch64-linux-gnu:/usr/lib"
+ENV OPENSSL_CONF="/etc/ssl/openssl.cnf"
 
 # ----------------------------------------------------------------------------
-# Step 3: Verify FIPS OpenSSL Works BEFORE Installing Packages (CRITICAL)
+# Step 4: Verify FIPS Configuration (CRITICAL)
 # Build must fail here if wolfProvider is not loaded
 # ----------------------------------------------------------------------------
 RUN set -eux; \
@@ -562,7 +657,7 @@ RUN set -eux; \
     openssl list -providers || { echo "ERROR: Cannot list providers!"; exit 1; }; \
     echo ""; \
     echo "Checking for wolfProvider..."; \
-    if openssl list -providers | grep -q "wolfprov"; then \
+    if openssl list -providers | grep -qi "wolfSSL Provider"; then \
         echo "✓ SUCCESS: wolfProvider is loaded and active"; \
     else \
         echo "✗ ERROR: wolfProvider is NOT loaded!"; \
@@ -600,7 +695,8 @@ RUN set -eux; \
         libpam-runtime \
         auditd \
         rsyslog-openssl \
-        sudo; \
+        sudo \
+        libopenscap8; \
     apt-get clean; \
     rm -rf /var/lib/apt/lists/*; \
     \
@@ -631,30 +727,13 @@ RUN set -eux; \
     echo "✓ All hardening packages verified"; \
     echo "========================================"
 
-# ----------------------------------------------------------------------------
-# Step 5: Remove System OpenSSL Packages
-# ----------------------------------------------------------------------------
-RUN set -eux; \
-    echo "Removing system OpenSSL packages..."; \
-    apt-get remove -y libssl3 openssl libssl-dev 2>/dev/null || true; \
-    apt-get autoremove -y 2>/dev/null || true; \
-    # Find and remove any remaining system OpenSSL libraries
-    find /usr/lib /lib -name "libssl.so.3" -delete 2>/dev/null || true; \
-    find /usr/lib /lib -name "libcrypto.so.3" -delete 2>/dev/null || true; \
-    # Reinstall FIPS OpenSSL libraries to system locations
-    cp -av ${OPENSSL_PREFIX}/lib64/libssl.so* /usr/lib/x86_64-linux-gnu/ 2>/dev/null || true; \
-    cp -av ${OPENSSL_PREFIX}/lib64/libcrypto.so* /usr/lib/x86_64-linux-gnu/ 2>/dev/null || true; \
-    cp -av ${WOLFSSL_PREFIX}/lib/libwolfssl.so* /usr/lib/x86_64-linux-gnu/ 2>/dev/null || true; \
-    ldconfig; \
-    echo "System OpenSSL packages removed"
-
 ################################################################################
 # NOTE: This section is managed by the FIPS team. Do NOT modify for STIG/CIS hardening.
 # COMMENTED OUT: Removing these libraries breaks OpenSCAP scanning (needs libgcrypt.so.20)
 # For testing/scanning, keep this section commented. FIPS team manages crypto removal.
 ################################################################################
 # # ----------------------------------------------------------------------------
-# # Step 6: Remove ALL Non-FIPS Crypto Libraries (MOST CRITICAL)
+# # Step 5: Remove ALL Non-FIPS Crypto Libraries (MOST CRITICAL)
 # # This ensures 100% FIPS compliance with no bypass paths
 # # ----------------------------------------------------------------------------
 # RUN set -eux; \
@@ -724,10 +803,6 @@ RUN chmod +x /usr/local/bin/fips-startup-check
 COPY --from=app-builder /app/coredns /coredns
 RUN chmod +x /coredns
 
-# Copy entrypoint script
-COPY fips-test.sh /fips-test.sh
-RUN chmod +x /fips-test.sh
-
 # ----------------------------------------------------------------------------
 # Step 8: Environment Variables for FIPS Mode
 # (Already set earlier before Step 3 verification)
@@ -743,22 +818,26 @@ RUN set -eux; \
     echo "========================================"; \
     echo ""; \
     echo "[1/6] OpenSSL Version:"; \
-    ${OPENSSL_PREFIX}/bin/openssl version; \
+    openssl version; \
     echo ""; \
     echo "[2/6] OpenSSL Providers:"; \
-    ${OPENSSL_PREFIX}/bin/openssl list -providers; \
+    openssl list -providers; \
     echo ""; \
     echo "[3/6] wolfProvider Module Location:"; \
-    ls -lah ${OPENSSL_PREFIX}/lib64/ossl-modules/; \
+    ARCH=$(uname -m); \
+    if [ "$ARCH" = "x86_64" ]; then MULTIARCH="x86_64-linux-gnu"; \
+    elif [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then MULTIARCH="aarch64-linux-gnu"; \
+    else MULTIARCH="x86_64-linux-gnu"; fi; \
+    ls -lah /usr/lib/${MULTIARCH}/ossl-modules/; \
     echo ""; \
     echo "[4/6] CoreDNS Binary:"; \
     ls -lh /coredns; \
     echo ""; \
-    echo "[5/6] Verifying wolfProvider is Active:"; \
-    if ${OPENSSL_PREFIX}/bin/openssl list -providers | grep -q "wolfprov"; then \
-        echo "✓ wolfProvider is loaded and active"; \
+    echo "[5/6] Verifying FIPS Provider (wolfProvider) is Active:"; \
+    if openssl list -providers | grep -qi "wolfSSL Provider"; then \
+        echo "✓ FIPS provider (wolfProvider) is loaded and active"; \
     else \
-        echo "✗ ERROR: wolfProvider is NOT loaded!"; \
+        echo "✗ ERROR: FIPS provider is NOT loaded!"; \
         exit 1; \
     fi; \
     echo ""; \
@@ -789,7 +868,7 @@ RUN set -eux; \
     echo ""; \
     echo "Environment Summary:"; \
     echo "  OPENSSL_CONF: ${OPENSSL_CONF}"; \
-    echo "  OPENSSL_MODULES: ${OPENSSL_MODULES}"; \
+    echo "  OPENSSL_MODULES: ${OPENSSL_MODULES:-<not set>}"; \
     echo "  LD_LIBRARY_PATH: ${LD_LIBRARY_PATH}"; \
     echo "  PATH: ${PATH}"; \
     echo ""; \
@@ -1104,6 +1183,9 @@ RUN set -eux; \
     echo "✓ Package manager binaries removed (apt, dpkg)"; \
     echo "Note: OpenSCAP scanning must be done before this step"
 
-# Set entrypoint for FIPS validation
-# Default command - run CoreDNS
-ENTRYPOINT ["/coredns"]
+# Copy and setup FIPS validation entrypoint script
+COPY --chmod=755 entrypoint.sh /entrypoint.sh
+
+# FIPS validation entrypoint with CoreDNS as default command
+ENTRYPOINT ["/entrypoint.sh"]
+CMD ["/coredns"]

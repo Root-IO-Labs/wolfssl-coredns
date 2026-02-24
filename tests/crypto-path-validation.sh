@@ -150,19 +150,18 @@ echo ""
 
 test_check_with_output "OPENSSL_CONF is set" \
     "docker run --rm --entrypoint=/bin/bash $IMAGE_NAME -c 'env | grep OPENSSL_CONF'" \
-    "OPENSSL_CONF=/usr/local/openssl/ssl/openssl.cnf"
+    "OPENSSL_CONF=/etc/ssl/openssl.cnf"
 
-test_check_with_output "OPENSSL_MODULES is set" \
-    "docker run --rm --entrypoint=/bin/bash $IMAGE_NAME -c 'env | grep OPENSSL_MODULES'" \
-    "OPENSSL_MODULES=/usr/local/openssl/lib64/ossl-modules"
+test_check "wolfProvider module exists on disk" \
+    "docker run --rm --entrypoint=/bin/bash $IMAGE_NAME -c 'test -f /usr/lib/x86_64-linux-gnu/ossl-modules/libwolfprov.so || test -f /usr/lib/aarch64-linux-gnu/ossl-modules/libwolfprov.so'"
 
 test_check_with_output "LD_LIBRARY_PATH includes FIPS OpenSSL" \
     "docker run --rm --entrypoint=/bin/bash $IMAGE_NAME -c 'env | grep LD_LIBRARY_PATH'" \
-    "/usr/local/openssl/lib64"
+    "/usr/lib/x86_64-linux-gnu"
 
 test_check_with_output "PATH includes FIPS OpenSSL binaries" \
     "docker run --rm --entrypoint=/bin/bash $IMAGE_NAME -c 'env | grep -E \"^PATH=\"'" \
-    "/usr/local/openssl/bin"
+    "/usr/bin"
 
 echo ""
 
@@ -176,22 +175,22 @@ echo ""
 echo "Verifying OpenSSL loads wolfProvider correctly..."
 echo ""
 
-test_check_with_output "OpenSSL version is 3.0.15" \
+test_check_with_output "OpenSSL version is 3.0.2" \
     "docker run --rm --entrypoint=/bin/bash $IMAGE_NAME -c 'openssl version'" \
-    "OpenSSL 3\\.0\\.15"
+    "OpenSSL 3\\.0\\.2"
 
 test_check_with_output "wolfProvider is loaded" \
-    "docker run --rm --entrypoint=/bin/bash $IMAGE_NAME -c 'openssl list -providers | grep -A 5 wolfprov'" \
+    "docker run --rm --entrypoint=/bin/bash $IMAGE_NAME -c 'openssl list -providers | grep -A 5 \"wolfSSL Provider\"'" \
     "status: active"
 
 test_check "OpenSSL config file exists" \
-    "docker run --rm --entrypoint=/bin/bash $IMAGE_NAME -c 'test -f /usr/local/openssl/ssl/openssl.cnf'"
+    "docker run --rm --entrypoint=/bin/bash $IMAGE_NAME -c 'test -f /etc/ssl/openssl.cnf'"
 
 test_check "wolfProvider module exists" \
-    "docker run --rm --entrypoint=/bin/bash $IMAGE_NAME -c 'test -f /usr/local/openssl/lib64/ossl-modules/libwolfprov.so'"
+    "docker run --rm --entrypoint=/bin/bash $IMAGE_NAME -c 'test -f /usr/lib/x86_64-linux-gnu/ossl-modules/libwolfprov.so'"
 
 test_check "wolfProvider config in openssl.cnf" \
-    "docker run --rm --entrypoint=/bin/bash $IMAGE_NAME -c 'grep -q wolfprov /usr/local/openssl/ssl/openssl.cnf'"
+    "docker run --rm --entrypoint=/bin/bash $IMAGE_NAME -c 'grep -q wolfprov /etc/ssl/openssl.cnf'"
 
 echo ""
 
@@ -271,7 +270,7 @@ test_check "CA certificates present for TLS" \
     "docker run --rm --entrypoint=/bin/bash $IMAGE_NAME -c 'test -d /etc/ssl/certs'"
 
 test_check "OpenSSL config has wolfProvider" \
-    "docker run --rm --entrypoint=/bin/bash $IMAGE_NAME -c 'grep -q wolfprov /usr/local/openssl/ssl/openssl.cnf'"
+    "docker run --rm --entrypoint=/bin/bash $IMAGE_NAME -c 'grep -q wolfprov /etc/ssl/openssl.cnf'"
 
 echo ""
 
@@ -309,7 +308,7 @@ if [ $FAILED -eq 0 ]; then
     echo "      ↓"
     echo "  golang-fips/go (patches Go crypto/* packages)"
     echo "      ↓"
-    echo "  OpenSSL 3.0.15 (provider architecture)"
+    echo "  OpenSSL 3.0.2 (provider architecture)"
     echo "      ↓"
     echo "  wolfProvider v1.1.0 (OpenSSL → wolfSSL bridge)"
     echo "      ↓"

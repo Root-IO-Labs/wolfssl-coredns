@@ -110,13 +110,13 @@ echo ""
 run_test \
     "OpenSSL version check" \
     "docker run --rm --entrypoint=/bin/bash $IMAGE_NAME -c 'openssl version'" \
-    "OpenSSL 3\.0\.15" \
-    "Expected OpenSSL 3.0.15"
+    "OpenSSL 3\.0\.2" \
+    "Expected Ubuntu System OpenSSL 3.0.2"
 
-# Test 2: wolfProvider loaded
+# Test 2: wolfProvider (FIPS provider) loaded
 run_test \
     "wolfProvider loaded check" \
-    "docker run --rm --entrypoint=/bin/bash $IMAGE_NAME -c 'openssl list -providers | grep -A 5 wolfprov'" \
+    "docker run --rm --entrypoint=/bin/bash $IMAGE_NAME -c 'openssl list -providers | grep -A 5 \"wolfSSL Provider\"'" \
     "status: active" \
     "wolfProvider is not active"
 

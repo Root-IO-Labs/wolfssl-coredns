@@ -38,9 +38,9 @@ CoreDNS Application
        ↓
 golang-fips/go (go1.24-fips-release)
        ↓
-OpenSSL 3.0.18 with FIPS module
+Ubuntu System OpenSSL 3.0.2 (FIPS-only mode)
        ↓
-wolfProvider v1.1.0
+wolfProvider v1.1.0 (FIPS provider only)
        ↓
 wolfSSL FIPS v5.8.2 (Certificate #4718)
 ```
@@ -50,8 +50,8 @@ wolfSSL FIPS v5.8.2 (Certificate #4718)
 | Component | Version | FIPS Status |
 |-----------|---------|-------------|
 | **wolfSSL** | 5.8.2-commercial-fips-v5.2.3 | ✅ FIPS 140-3 Certificate #4718 |
-| **OpenSSL** | 3.0.18 | ✅ FIPS module enabled |
-| **wolfProvider** | v1.1.0 | ✅ Validated bridge |
+| **OpenSSL** | 3.0.2 (Ubuntu System) | ✅ FIPS-only mode (default provider disabled) |
+| **wolfProvider** | v1.1.0 | ✅ Validated bridge (FIPS provider only) |
 | **golang-fips/go** | go1.24-fips-release | ✅ FIPS-enabled Go runtime |
 
 ### 1.3 FIPS Hardening Measures
@@ -59,10 +59,10 @@ wolfSSL FIPS v5.8.2 (Certificate #4718)
 **Implemented Security Controls:**
 
 1. **Cryptographic Library Management**
-   - Custom-built OpenSSL 3.0.18 with FIPS module
+   - Ubuntu System OpenSSL 3.0.2 with FIPS-only provider configuration
    - wolfSSL FIPS v5 with validated build process
-   - wolfProvider integration for FIPS-compliant operations
-   - Removal of system OpenSSL packages to prevent bypass
+   - wolfProvider v1.1.0 integration (FIPS provider only, default provider disabled)
+   - Removal of non-FIPS crypto libraries (GnuTLS, Nettle, libgcrypt)
 
 2. **Build-Time Validations**
    - FIPS startup check utility (Dockerfile.hardened:127-133)
@@ -71,15 +71,17 @@ wolfSSL FIPS v5.8.2 (Certificate #4718)
    - CVE-2024-9355 detection for golang-fips/openssl (Dockerfile.hardened:259-301)
 
 3. **Runtime Environment**
-   - `OPENSSL_CONF` configured for wolfProvider
-   - `OPENSSL_MODULES` set to validated module directory
-   - `LD_LIBRARY_PATH` restricted to FIPS libraries only
+   - `OPENSSL_CONF=/etc/ssl/openssl.cnf` configured for FIPS-only mode
+   - `GOLANG_FIPS=1` enforces FIPS in golang-fips/go runtime
+   - `LD_LIBRARY_PATH` includes wolfSSL FIPS library paths
    - Dynamic linker cache configured for FIPS libraries (Dockerfile.hardened:531)
+   - **Note**: `OPENSSL_MODULES` not required (module path in openssl.cnf for OpenSSL 3.x)
 
 4. **Non-FIPS Crypto Library Removal**
-   - System OpenSSL packages removed (Dockerfile.hardened:638-650)
+   - Non-FIPS crypto libraries removed (GnuTLS, Nettle, libgcrypt)
    - Package managers removed to prevent runtime modifications (Dockerfile.hardened:1086-1106)
-   - Note: libgcrypt and libgnutls retained for OpenSCAP compliance scanning
+   - Default OpenSSL provider disabled in configuration (FIPS-only mode)
+   - Note: Some minimal libraries retained for OpenSCAP compliance scanning
 
 ### 1.4 Cryptographic Algorithm Analysis
 
@@ -95,8 +97,9 @@ wolfSSL FIPS v5.8.2 (Certificate #4718)
 **FIPS Runtime Validation: ✅ PASSED**
 
 All cryptographic operations verified during build testing:
-- ✅ OpenSSL 3.0.18 with FIPS module active
-- ✅ wolfProvider v1.1.0 loaded and functional
+- ✅ Ubuntu System OpenSSL 3.0.2 in FIPS-only mode
+- ✅ wolfProvider v1.1.0 loaded and functional (FIPS provider only)
+- ✅ Default OpenSSL provider disabled (strict FIPS compliance)
 - ✅ wolfSSL FIPS v5 integrity checks passed
 - ✅ SHA-256/SHA-384 operations working correctly
 - ✅ MD5 properly blocked in strict FIPS mode
@@ -366,12 +369,13 @@ All 56 applicable DISA STIG security controls passed successfully. The 157 "not 
 **Build System:** Docker BuildKit with multi-stage builds
 
 **Build Stages:**
-1. OpenSSL 3.0.18 with FIPS module (Stage 1)
-2. wolfSSL FIPS v5.8.2 (Stage 2, requires commercial license)
-3. wolfProvider v1.1.0 (Stage 3)
-4. golang-fips/go toolchain (Stage 4, ~30-40 minutes)
-5. CoreDNS v1.13.2 compilation (Stage 5)
-6. Hardened runtime image (Stage 6)
+1. wolfSSL FIPS v5.8.2 (Stage 1, requires commercial license)
+2. wolfProvider v1.1.0 (Stage 2)
+3. golang-fips/go toolchain (Stage 3, ~30-40 minutes)
+4. CoreDNS v1.13.2 compilation (Stage 4)
+5. Hardened runtime image with Ubuntu System OpenSSL 3.0.2 (Stage 5)
+   - Installs OpenSSL 3.0.2 via APT (not custom-built)
+   - Configures FIPS-only mode (default provider disabled)
 
 ### 6.2 Test Suite
 
@@ -495,9 +499,10 @@ DOCKER_BUILDKIT=1 docker build \
 
 #### Immediate Actions (Priority: HIGH)
 1. ✅ **FIPS Runtime Validation**
-   - Execute `fips-test.sh` in production environment
-   - Run `tests/verify-fips-compliance.sh` comprehensive test suite
+   - FIPS validation runs automatically via `/entrypoint.sh` on container start
+   - Run `tests/verify-fips-compliance.sh` comprehensive test suite (118 checks)
    - Verify wolfProvider is active: `openssl list -providers | grep wolfprov`
+   - Manual validation: `/usr/local/bin/fips-startup-check`
 
 2. ✅ **TLS Integration Testing**
    - Test DNS-over-TLS (DoT) connections

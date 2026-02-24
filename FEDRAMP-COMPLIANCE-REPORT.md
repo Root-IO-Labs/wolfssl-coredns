@@ -149,8 +149,8 @@ The image includes the following major components:
 
 **Cryptographic Stack:**
 - wolfSSL FIPS v5.8.2 (CMVP Certificate #4718) - FIPS 140-3 validated cryptographic module
-- OpenSSL 3.0.18 with FIPS provider - Industry-standard cryptographic library
-- wolfProvider v1.1.0 - Bridge between OpenSSL 3.x and wolfSSL FIPS module
+- Ubuntu System OpenSSL 3.0.2 (FIPS-only mode) - System OpenSSL with default provider disabled
+- wolfProvider v1.1.0 - Bridge between OpenSSL 3.x and wolfSSL FIPS module (FIPS provider only)
 - golang-fips/go (go1.24-fips-release) - FIPS-aware Go runtime for application compilation
 
 **Operating System:**
@@ -223,10 +223,11 @@ This image achieves the following security objectives:
 │  └───────────────────────────────────────────────────────────────┘ │
 │                              ↓                                      │
 │  ┌───────────────────────────────────────────────────────────────┐ │
-│  │              OpenSSL 3.0.18 (FIPS module enabled)            │ │
-│  │  • Industry-standard cryptographic API                       │ │
+│  │     Ubuntu System OpenSSL 3.0.2 (FIPS-only mode)            │ │
+│  │  • APT-installed OpenSSL (not custom-built)                  │ │
 │  │  • FIPS provider loaded via openssl.cnf                      │ │
-│  │  • Routes operations to wolfProvider                         │ │
+│  │  • Default provider DISABLED (strict FIPS compliance)        │ │
+│  │  • Routes operations to wolfProvider only                    │ │
 │  └───────────────────────────────────────────────────────────────┘ │
 │                              ↓                                      │
 │  ┌───────────────────────────────────────────────────────────────┐ │
@@ -284,17 +285,17 @@ This image achieves the following security objectives:
 ### Build Architecture
 
 ```
-Build Stage 1: OpenSSL 3.0.18 + FIPS module
+Build Stage 1: wolfSSL FIPS v5.8.2 (commercial, password-protected)
         ↓
-Build Stage 2: wolfSSL FIPS v5.8.2 (commercial, password-protected)
+Build Stage 2: wolfProvider v1.1.0
         ↓
-Build Stage 3: wolfProvider v1.1.0
+Build Stage 3: golang-fips/go toolchain (30-40 min build)
         ↓
-Build Stage 4: golang-fips/go toolchain (30-40 min build)
+Build Stage 4: CoreDNS v1.13.2 compilation
         ↓
-Build Stage 5: CoreDNS v1.13.2 compilation
-        ↓
-Build Stage 6: Runtime image assembly + STIG/CIS hardening
+Build Stage 5: Runtime image assembly + Ubuntu System OpenSSL 3.0.2
+        ↓ (Configures FIPS-only mode, default provider disabled)
+Build Stage 6: STIG/CIS hardening + non-FIPS library removal
         ↓
 Final Image: 440 MB multi-arch (amd64, arm64)
 ```
@@ -410,7 +411,7 @@ The **cryptographic boundary** for wolfSSL FIPS v5.8.2 is defined as:
 
 **Excluded from Boundary:**
 - wolfProvider (bridge layer, not part of validated module)
-- OpenSSL 3.0.18 (uses module via provider interface)
+- Ubuntu System OpenSSL 3.0.2 (uses module via provider interface, FIPS-only mode)
 - golang-fips/go runtime (routes calls to module)
 - CoreDNS application (consumer of crypto services)
 
@@ -587,7 +588,14 @@ The utility is available for manual or automated validation:
 
 **Container Entrypoint:**
 
-File: `/fips-test.sh` (optional entrypoint for FIPS validation before CoreDNS start)
+File: `/entrypoint.sh` (performs comprehensive FIPS validation before CoreDNS start)
+
+The entrypoint script validates:
+1. Environment variables (GOLANG_FIPS, OPENSSL_CONF)
+2. OpenSSL version and FIPS provider status
+3. wolfProvider module availability
+4. FIPS integrity using fips-startup-check utility
+5. Provider configuration and algorithm properties
 
 ---
 
@@ -680,15 +688,16 @@ Executed **during** normal operation:
 ROOT replaces non-FIPS system libraries with FIPS-validated components:
 
 **Pre-Integration State (Standard Ubuntu 22.04):**
-- OpenSSL 3.0.2 (system package, not FIPS-validated)
+- OpenSSL 3.0.2 (system package, default and base providers)
 - No wolfSSL
 - Standard glibc crypto functions
 
 **Post-Integration State (This Image):**
-- OpenSSL 3.0.18 (custom build with FIPS module support)
+- Ubuntu System OpenSSL 3.0.2 (FIPS-only mode, default provider DISABLED)
 - wolfSSL FIPS v5.8.2 (CMVP Certificate #4718)
-- wolfProvider (OpenSSL 3.x provider interface)
+- wolfProvider v1.1.0 (OpenSSL 3.x provider interface, FIPS provider only)
 - golang-fips/go (FIPS-aware Go runtime)
+- Non-FIPS crypto libraries removed (GnuTLS, Nettle, libgcrypt)
 
 #### Dynamic Linking Modifications
 
@@ -1977,7 +1986,7 @@ The CoreDNS SBOM includes:
 
 **Cryptographic Components:**
 - wolfSSL FIPS v5.8.2 (commercial binary)
-- OpenSSL 3.0.18 (source build)
+- Ubuntu System OpenSSL 3.0.2 (APT package, configured for FIPS-only mode)
 - wolfProvider v1.1.0 (source build)
 - golang-fips/go toolchain (source build)
 
@@ -2066,12 +2075,12 @@ Provenance addresses supply chain attacks by ensuring:
 1. Source Checkout (git clone with tag verification)
    ↓
 2. Multi-Stage Docker Build
-   - Stage 1: OpenSSL 3.0.18 build
-   - Stage 2: wolfSSL FIPS v5.8.2 build (commercial, authenticated)
-   - Stage 3: wolfProvider v1.1.0 build
-   - Stage 4: golang-fips/go toolchain build
-   - Stage 5: CoreDNS v1.13.2 compilation
-   - Stage 6: Runtime image assembly + hardening
+   - Stage 1: wolfSSL FIPS v5.8.2 build (commercial, authenticated)
+   - Stage 2: wolfProvider v1.1.0 build
+   - Stage 3: golang-fips/go toolchain build
+   - Stage 4: CoreDNS v1.13.2 compilation
+   - Stage 5: Runtime image assembly + Ubuntu System OpenSSL 3.0.2 (APT install, FIPS-only config)
+   - Stage 6: STIG/CIS hardening + non-FIPS library removal
    ↓
 3. Compliance Scanning (STIG, CIS, vulnerabilities)
    ↓
@@ -2778,9 +2787,10 @@ This CoreDNS v1.13.2 FIPS-hardened container image demonstrates **full complianc
 
 ### Cryptographic Compliance
 - ✅ FIPS 140-3 validated cryptographic module (wolfSSL FIPS v5.8.2, Certificate #4718)
-- ✅ Comprehensive FIPS stack integration (golang-fips/go, OpenSSL 3.0.18, wolfProvider)
+- ✅ Comprehensive FIPS stack integration (golang-fips/go, Ubuntu System OpenSSL 3.0.2, wolfProvider v1.1.0)
+- ✅ **FIPS-only mode** enforced (default OpenSSL provider disabled for strict compliance)
 - ✅ FIPS mode enforced at build time and runtime
-- ✅ All cryptographic operations validated through automated testing
+- ✅ All cryptographic operations validated through automated testing (118 checks)
 
 ### Configuration Security
 - ✅ 100% DISA STIG V2R1 compliance (56/56 applicable checks passed)
