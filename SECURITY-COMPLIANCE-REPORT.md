@@ -92,7 +92,7 @@ wolfSSL FIPS v5.8.2 (Certificate #4718)
 | **golang.org/x/crypto** | Present | ✅ VERIFIED | golang-fips/go routes to FIPS OpenSSL |
 | **X25519** | Present | ✅ COMPLIANT | TLS 1.3 key exchange via FIPS provider |
 | **Ed25519** | Present | ✅ COMPLIANT | Signature verification only (public-key operation) |
-| **ChaCha20** | Not Found | ✅ COMPLIANT | Not present in binary |
+| **ChaCha20-Poly1305** | Actively Removed | ✅ COMPLIANT | Present in source (golang-fips/go, quic-go), removed via build-time patching. Verified absent in final binary. |
 
 **FIPS Runtime Validation: ✅ PASSED**
 
@@ -104,6 +104,80 @@ All cryptographic operations verified during build testing:
 - ✅ SHA-256/SHA-384 operations working correctly
 - ✅ MD5 properly blocked in strict FIPS mode
 - ✅ golang-fips/go integration verified (dlopen runtime loading)
+
+### 1.4.1 ChaCha20-Poly1305 Removal Implementation
+
+ChaCha20-Poly1305 is a **non-FIPS approved cipher suite** that was actively removed from source code during the build process to ensure strict FIPS 140-3 compliance.
+
+#### Source Code Status
+
+**Before Patching:**
+- ❌ ChaCha20-Poly1305 **present** in golang-fips/go `src/crypto/tls/` source files
+- ❌ ChaCha20-Poly1305 **present** in quic-go v0.57.0 dependency (6 files)
+- ❌ Build **fails** with error: `undefined: tls.TLS_CHACHA20_POLY1305_SHA256`
+
+**After Patching:**
+- ✅ ChaCha20-Poly1305 **absent** from all source files
+- ✅ Build **succeeds** without errors
+- ✅ Final binary **contains zero** ChaCha20 references
+
+#### Implementation Details
+
+**1. golang-fips/go Crypto/TLS Patching**
+- **Location:** Dockerfile.hardened:244-272
+- **Method:** Comprehensive sed-based removal from ALL .go files
+- **Files Affected:** All files in `src/crypto/tls/` directory
+  - `cipher_suites.go` - TLS cipher suite definitions
+  - `defaults.go` - Default cipher suite configurations
+  - `common.go`, `conn.go`, `handshake_*.go` - Any other files with references
+- **Command:** `sed -i '/TLS_CHACHA20_POLY1305_SHA256/d' *.go`
+- **Verification:** grep check ensures complete removal before Go compilation
+- **Rationale:** Removes non-FIPS cipher suite from Go's TLS implementation
+
+**2. quic-go Dependency Patching**
+- **Location:** Dockerfile.hardened:417-442
+- **Timing:** After `go mod download`, before `go build`
+- **Dependency:** quic-go v0.57.0 (used for DNS-over-HTTP/3 support)
+- **Files Patched:**
+
+  *Production Code (3 files):*
+  - `internal/handshake/cipher_suite.go` - Cipher suite selection logic
+  - `internal/handshake/header_protector.go` - QUIC header protection
+  - `internal/handshake/updatable_aead.go` - AEAD cipher management
+
+  *Test Code (3 files):*
+  - `internal/handshake/hkdf_test.go` - Key derivation tests
+  - `internal/handshake/updatable_aead_test.go` - AEAD tests
+  - `internal/handshake/handshake_helpers_test.go` - Handshake helper tests
+
+- **Verification:** grep check ensures no ChaCha20 references remain in quic-go
+- **Rationale:** quic-go had hardcoded `tls.TLS_CHACHA20_POLY1305_SHA256` constant that was removed from golang-fips/go
+
+#### Why Both Patches Are Required
+
+1. **golang-fips/go patching** removes ChaCha20 from Go's standard library crypto/tls
+2. **quic-go patching** removes hardcoded references in the QUIC library that depend on the removed constant
+3. Without both patches, the build fails because quic-go references a constant that no longer exists
+
+#### Compliance Verification
+
+**Build-Time Checks:**
+- Automated grep verification after each patching step
+- Build fails if any ChaCha20 references remain
+- Final binary analysis confirms zero ChaCha20 presence
+
+**Runtime Verification:**
+- FIPS mode enforces AES-GCM cipher suites only
+- TLS 1.3 connections use FIPS-approved algorithms
+- No fallback to non-FIPS cipher suites possible
+
+#### Result
+
+After comprehensive patching:
+- ✅ **Source code:** ChaCha20 completely removed from all build inputs
+- ✅ **Binary:** Zero ChaCha20 references in final CoreDNS executable
+- ✅ **Runtime:** Only FIPS-approved cipher suites available (AES-128-GCM, AES-256-GCM)
+- ✅ **Compliance:** Strict FIPS 140-3 adherence with no non-approved algorithms
 
 ### 1.5 Multi-Architecture Support
 

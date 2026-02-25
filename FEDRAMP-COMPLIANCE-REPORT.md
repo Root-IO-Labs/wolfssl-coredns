@@ -489,7 +489,7 @@ The following algorithms are **NOT** approved for FIPS mode and are blocked:
 - Blowfish - Prohibited
 
 **Blocked at Application Level:**
-- ChaCha20-Poly1305 - Not FIPS-approved (verified absent in binary, Dockerfile.hardened:440-456)
+- ChaCha20-Poly1305 - Not FIPS-approved (actively removed via patching: Dockerfile.hardened:244-272 for golang-fips/go, 417-442 for quic-go dependency)
 - X25519 - Routed through FIPS provider for TLS 1.3 compliance
 
 #### Algorithm Enforcement Mechanisms
@@ -506,7 +506,10 @@ The following algorithms are **NOT** approved for FIPS mode and are blocked:
 
 3. **Binary Analysis**
    - Build process scans for non-approved algorithm references (Dockerfile.hardened:369-472)
-   - ChaCha20 confirmed absent from binary
+   - ChaCha20 actively removed via comprehensive patching:
+     - golang-fips/go crypto/tls patching (Dockerfile.hardened:244-272)
+     - quic-go dependency patching (Dockerfile.hardened:417-442)
+   - ChaCha20 confirmed absent from final binary
    - golang.org/x/crypto routed through FIPS stack
 
 4. **Continuous Monitoring**
@@ -761,7 +764,22 @@ This CoreDNS v1.13.2 image required the following FIPS-specific modifications:
    - golang-fips/go ensures TLS cipher suites use FIPS-approved algorithms
    - Non-FIPS cipher suites (ChaCha20-Poly1305) confirmed absent
 
-4. **OpenSSL Configuration File**
+4. **ChaCha20-Poly1305 Removal via Comprehensive Patching**
+   - **golang-fips/go Patching** (Dockerfile.hardened:244-272)
+     - Comprehensive sed-based removal from ALL .go files in src/crypto/tls/
+     - Removes from cipher_suites.go, defaults.go, and all other TLS source files
+     - Reason: ChaCha20-Poly1305 is not FIPS-approved, must be removed for compliance
+   - **quic-go Dependency Patching** (Dockerfile.hardened:417-442)
+     - Patches quic-go v0.57.0 after `go mod download`
+     - Removes hardcoded `tls.TLS_CHACHA20_POLY1305_SHA256` references from 6 files
+     - Production files: cipher_suite.go, header_protector.go, updatable_aead.go
+     - Test files: hkdf_test.go, updatable_aead_test.go, handshake_helpers_test.go
+     - Reason: quic-go had hardcoded references to constant removed from golang-fips/go
+     - Without this patch: Build fails with "undefined: tls.TLS_CHACHA20_POLY1305_SHA256"
+   - **Verification**: Automated grep checks ensure complete removal before compilation
+   - **Result**: Final binary contains zero ChaCha20 references
+
+5. **OpenSSL Configuration File**
    - Custom `openssl.cnf` with wolfProvider settings
    - Ensures FIPS mode activation on every OpenSSL operation
    - Location: `openssl-wolfprov.cnf` copied to `/usr/local/openssl/ssl/openssl.cnf`

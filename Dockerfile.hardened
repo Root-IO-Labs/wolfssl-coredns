@@ -54,8 +54,6 @@ RUN --mount=type=secret,id=wolfssl_password,required=true \
     rm /tmp/wolfssl.7z; \
     find /usr/src -maxdepth 1 -type d -name "wolfssl*" -exec mv {} /usr/src/wolfssl \;; \
     cd /usr/src/wolfssl; \
-    # Configure wolfSSL with FIPS v5 and necessary features
-    # NOTE: Do NOT patch settings.h - it would invalidate FIPS certificate
     ./configure \
         --prefix=${WOLFSSL_PREFIX} \
         --enable-fips=v5 \
@@ -133,7 +131,6 @@ RUN set -eux; \
     git clone --depth 1 --branch ${WOLFPROV_VERSION} ${WOLFPROV_REPO} wolfProvider; \
     cd wolfProvider; \
     ./autogen.sh; \
-    # Detect architecture for multi-arch support
     ARCH=$(uname -m); \
     if [ "$ARCH" = "x86_64" ]; then MULTIARCH="x86_64-linux-gnu"; \
     elif [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then MULTIARCH="aarch64-linux-gnu"; \
@@ -147,7 +144,6 @@ RUN set -eux; \
         LDFLAGS="-L/usr/lib/${MULTIARCH}" \
     ; \
     make -j"$(nproc)"; \
-    # Install to Ubuntu system modules directory
     mkdir -p /usr/lib/${MULTIARCH}/ossl-modules; \
     cp -v .libs/libwolfprov.so* /usr/lib/${MULTIARCH}/ossl-modules/; \
     echo "Checking installed wolfProvider files:"; \
@@ -216,9 +212,6 @@ ENV PKG_CONFIG_PATH="${WOLFSSL_PREFIX}/lib/pkgconfig"
 # Copy OpenSSL configuration (same for build and runtime - FIPS-only mode)
 COPY openssl-wolfprov.cnf /tmp/openssl-wolfprov.cnf
 
-# Copy FIPS compliance patch for golang-fips/go
-COPY golang-fips-remove-tls13-chacha20.patch /tmp/golang-fips-remove-tls13-chacha20.patch
-
 # Configure OpenSSL for FIPS-only mode (same config for build and runtime)
 RUN set -eux; \
     ARCH=$(uname -m); \
@@ -234,7 +227,6 @@ ENV OPENSSL_CONF=/etc/ssl/openssl.cnf
 # Build golang-fips/go from source with Ubuntu System OpenSSL
 # Note: golang-fips/go uses a meta-repository with git submodules and patches
 RUN set -eux; \
-    # Detect architecture for multi-arch support
     ARCH=$(uname -m); \
     if [ "$ARCH" = "x86_64" ]; then MULTIARCH="x86_64-linux-gnu"; \
     elif [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then MULTIARCH="aarch64-linux-gnu"; \
@@ -249,21 +241,36 @@ RUN set -eux; \
     git submodule update --init --recursive; \
     cd /tmp/go-fips-repo; \
     ./scripts/full-initialize-repo.sh; \
-    echo "Applying FIPS compliance fix: Removing ChaCha20 from TLS 1.3 cipher suites"; \
+    echo ""; \
+    echo "========================================"; \
+    echo "CRITICAL FIX: Removing TLS 1.3 ChaCha20-Poly1305 (Non-FIPS)"; \
+    echo "========================================"; \
+    echo "  - Patch written for upstream Go but applied to golang-fips/go"; \
+    echo "  - golang-fips patches modify cipher_suites.go, causing context mismatch"; \
+    echo "  - Patch failures were silent, not build errors"; \
+    echo ""; \
+    echo "Solution: Use sed to directly remove ALL ChaCha20 references from crypto/tls"; \
+    echo ""; \
     cd /tmp/go-fips-repo/go; \
-    CIPHER_FILE="src/crypto/tls/cipher_suites.go"; \
-    if grep -q "TLS_CHACHA20_POLY1305_SHA256.*aeadChaCha20Poly1305" "$CIPHER_FILE"; then \
-        echo "Found ChaCha20 cipher suite, removing it..."; \
-        sed -i '/TLS_CHACHA20_POLY1305_SHA256.*aeadChaCha20Poly1305/d' "$CIPHER_FILE"; \
-        echo "ChaCha20 cipher suite removed successfully"; \
-    else \
-        echo "WARNING: ChaCha20 cipher suite not found in expected format"; \
+    echo "  - Removing TLS 1.3 ChaCha20-Poly1305 (non-FIPS) from crypto/tls..."; \
+    cd src/crypto/tls; \
+    for file in *.go; do \
+        if [ -f "$file" ]; then \
+            sed -i '/TLS_CHACHA20_POLY1305_SHA256/d' "$file"; \
+        fi; \
+    done; \
+    cd ../../..; \
+    if grep -r "TLS_CHACHA20_POLY1305_SHA256" src/crypto/tls/ 2>/dev/null; then \
+        echo "ERROR: Failed to remove all ChaCha20-Poly1305 references!"; \
+        grep -rn "TLS_CHACHA20_POLY1305_SHA256" src/crypto/tls/ || true; \
+        exit 1; \
     fi; \
+    echo "  ✓ ChaCha20-Poly1305 successfully removed from all crypto/tls files"; \
+    echo "  ✓ TLS 1.3 will only use FIPS-approved AES-GCM cipher suites"; \
+    echo "========================================"; \
+    echo ""; \
     cd /tmp/go-fips-repo/go/src; \
-    CGO_ENABLED=1 \
-    CGO_CFLAGS="-I/usr/include -I${WOLFSSL_PREFIX}/include" \
-    CGO_LDFLAGS="-L/usr/lib/${MULTIARCH} -L${WOLFSSL_PREFIX}/lib" \
-    ./make.bash; \
+    CGO_ENABLED=1 CGO_CFLAGS="-I/usr/include -I${WOLFSSL_PREFIX}/include" CGO_LDFLAGS="-L/usr/lib/${MULTIARCH} -L${WOLFSSL_PREFIX}/lib" ./make.bash; \
     FINAL_GOROOT=/usr/local/go-fips; \
     mv /tmp/go-fips-repo/go ${FINAL_GOROOT}; \
     rm -rf /tmp/go-fips-repo; \
@@ -388,7 +395,6 @@ ENV OPENSSL_CONF=/etc/ssl/openssl.cnf
 
 # Clone and build CoreDNS v1.13.2
 RUN set -eux; \
-    # Detect architecture for multi-arch support
     ARCH=$(uname -m); \
     if [ "$ARCH" = "x86_64" ]; then MULTIARCH="x86_64-linux-gnu"; \
     elif [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then MULTIARCH="aarch64-linux-gnu"; \
@@ -407,6 +413,37 @@ RUN set -eux; \
     go version; \
     echo "Downloading dependencies..."; \
     go mod download; \
+    echo ""; \
+    echo "========================================"; \
+    echo "CRITICAL FIX: Patching quic-go for FIPS (Remove ChaCha20)"; \
+    echo "========================================"; \
+    echo "Issue: quic-go has hardcoded references to tls.TLS_CHACHA20_POLY1305_SHA256"; \
+    echo "  - This constant was removed from golang-fips/go crypto/tls"; \
+    echo "  - Without patching, CoreDNS build will fail"; \
+    echo ""; \
+    echo "Patching quic-go v0.57.0..."; \
+    QUIC_GO_PATH="/root/go/pkg/mod/github.com/quic-go/quic-go@v0.57.0"; \
+    if [ -d "$QUIC_GO_PATH" ]; then \
+        chmod -R u+w "$QUIC_GO_PATH"; \
+        echo "  - Removing ChaCha20 from production code..."; \
+        sed -i '/TLS_CHACHA20_POLY1305_SHA256/d' "$QUIC_GO_PATH/internal/handshake/cipher_suite.go"; \
+        sed -i '/TLS_CHACHA20_POLY1305_SHA256/d' "$QUIC_GO_PATH/internal/handshake/header_protector.go"; \
+        sed -i '/TLS_CHACHA20_POLY1305_SHA256/d' "$QUIC_GO_PATH/internal/handshake/updatable_aead.go"; \
+        echo "  - Removing ChaCha20 from test files..."; \
+        sed -i 's/tls\.TLS_AES_128_GCM_SHA256, tls\.TLS_AES_256_GCM_SHA384, tls\.TLS_CHACHA20_POLY1305_SHA256/tls.TLS_AES_128_GCM_SHA256, tls.TLS_AES_256_GCM_SHA384/' "$QUIC_GO_PATH/internal/handshake/hkdf_test.go"; \
+        sed -i '/TLS_CHACHA20_POLY1305_SHA256/d' "$QUIC_GO_PATH/internal/handshake/updatable_aead_test.go"; \
+        sed -i '/getCipherSuite(tls\.TLS_CHACHA20_POLY1305_SHA256)/d' "$QUIC_GO_PATH/internal/handshake/handshake_helpers_test.go"; \
+        if grep -r "TLS_CHACHA20_POLY1305_SHA256" "$QUIC_GO_PATH/internal/handshake/" 2>/dev/null; then \
+            echo "ERROR: Failed to remove all ChaCha20 references from quic-go!"; \
+            grep -rn "TLS_CHACHA20_POLY1305_SHA256" "$QUIC_GO_PATH/internal/handshake/" || true; \
+            exit 1; \
+        fi; \
+        echo "  ✓ quic-go patched successfully (production + test files)"; \
+    else \
+        echo "  ℹ️  quic-go not found at expected path, skipping patch"; \
+    fi; \
+    echo "========================================"; \
+    echo ""; \
     echo "Building CoreDNS binary with Ubuntu System OpenSSL..."; \
     CGO_ENABLED=1 \
     CGO_CFLAGS="-I/usr/include -I${WOLFSSL_PREFIX}/include" \
@@ -435,7 +472,6 @@ RUN set -eux; \
     echo ""; \
     echo "Scanning /app/coredns binary for cryptographic references..."; \
     echo ""; \
-    # Scan for golang.org/x/crypto references
     X_CRYPTO_COUNT=$(strings /app/coredns 2>/dev/null | grep -c "golang.org/x/crypto" || echo 0); \
     if [ "$X_CRYPTO_COUNT" -gt 0 ]; then \
         echo "⚠️  WARNING: Found $X_CRYPTO_COUNT golang.org/x/crypto references"; \
@@ -456,7 +492,6 @@ RUN set -eux; \
     else \
         echo "✓ No golang.org/x/crypto references found"; \
     fi; \
-    # Check for X25519/curve25519 (TLS 1.3 key exchange)
     X25519_COUNT=$(strings /app/coredns 2>/dev/null | grep -icE "x25519|curve25519" || echo 0); \
     if [ "$X25519_COUNT" -gt 0 ]; then \
         echo "⚠️  WARNING: Found $X25519_COUNT X25519/curve25519 references"; \
@@ -478,7 +513,6 @@ RUN set -eux; \
     else \
         echo "ℹ️  No X25519/curve25519 references found"; \
     fi; \
-    # Check for Ed25519 (DNSSEC signatures, JWT tokens)
     ED25519_COUNT=$(strings /app/coredns 2>/dev/null | grep -ic "ed25519" || echo 0); \
     if [ "$ED25519_COUNT" -gt 0 ]; then \
         echo "ℹ️  INFO: Found $ED25519_COUNT Ed25519 references"; \
@@ -495,7 +529,6 @@ RUN set -eux; \
     else \
         echo "ℹ️  No Ed25519 references found"; \
     fi; \
-    # Check for ChaCha20 (stream cipher) - CRITICAL FOR FIPS
     CHACHA20_COUNT=$(strings /app/coredns 2>/dev/null | grep -ic "chacha20" || echo 0); \
     if [ "$CHACHA20_COUNT" -gt 0 ]; then \
         echo "⚠️  CRITICAL: Found $CHACHA20_COUNT ChaCha20 references"; \
@@ -618,18 +651,14 @@ RUN set -eux; \
 # ----------------------------------------------------------------------------
 RUN set -eux; \
     echo "Installing wolfSSL to system locations..."; \
-    # Detect architecture and set multiarch path dynamically
     ARCH=$(uname -m); \
     if [ "$ARCH" = "x86_64" ]; then MULTIARCH="x86_64-linux-gnu"; \
     elif [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then MULTIARCH="aarch64-linux-gnu"; \
     else echo "ERROR: Unsupported architecture $ARCH"; exit 1; fi; \
     echo "Detected architecture: $ARCH, multiarch: $MULTIARCH"; \
-    # Copy wolfSSL libraries to system location
     cp -av ${WOLFSSL_PREFIX}/lib/libwolfssl.so* /usr/lib/${MULTIARCH}/ || true; \
-    # Create dynamic linker configuration
     echo "${WOLFSSL_PREFIX}/lib" > /etc/ld.so.conf.d/fips-wolfssl.conf; \
     echo "/usr/lib/${MULTIARCH}" >> /etc/ld.so.conf.d/fips-wolfssl.conf; \
-    # Update dynamic linker cache
     ldconfig; \
     echo "wolfSSL installed to system locations"
 
@@ -704,7 +733,6 @@ RUN set -eux; \
     echo "Verifying FIPS Compliance of Installed Packages"; \
     echo "========================================"; \
     \
-    # Verify rsyslog-openssl uses FIPS OpenSSL
     echo "Checking rsyslog linkage:"; \
     ldd /usr/sbin/rsyslogd | grep -E "libssl|libcrypto" || echo "  (no OpenSSL linkage)"; \
     \
@@ -718,7 +746,6 @@ RUN set -eux; \
         fi; \
     fi; \
     \
-    # Verify OpenSCAP installation
     if command -v oscap &>/dev/null; then \
         echo "✓ OpenSCAP installed for compliance scanning"; \
         oscap --version | head -1 || true; \
@@ -1099,11 +1126,8 @@ RUN set -eux; \
     echo "========================================"; \
     echo "Final System Executable Permission Check"; \
     echo "========================================"; \
-    # Ensure all executables are 0755 (rwxr-xr-x) - no group/world write
     find /bin /sbin /usr/bin /usr/sbin /usr/local/bin /usr/local/sbin -type f -exec chmod 0755 {} \; 2>/dev/null || true; \
-    # Ensure all are owned by root:root
     find /bin /sbin /usr/bin /usr/sbin /usr/local/bin /usr/local/sbin -type f -exec chown root:root {} \; 2>/dev/null || true; \
-    # Ensure directories are 0755
     find /bin /sbin /usr/bin /usr/sbin /usr/local/bin /usr/local/sbin -type d -exec chmod 0755 {} \; 2>/dev/null || true; \
     echo "✓ All system executables have restrictive permissions (0755)"
 
@@ -1165,19 +1189,16 @@ RUN set -eux; \
     echo "========================================"; \
     echo "Removing Package Manager Binaries"; \
     echo "========================================"; \
-    # Use dpkg-divert to override package protection
     dpkg-divert --add --rename --divert /usr/bin/apt.real /usr/bin/apt 2>/dev/null || true; \
     dpkg-divert --add --rename --divert /usr/bin/apt-get.real /usr/bin/apt-get 2>/dev/null || true; \
     dpkg-divert --add --rename --divert /usr/bin/apt-cache.real /usr/bin/apt-cache 2>/dev/null || true; \
     dpkg-divert --add --rename --divert /usr/bin/dpkg.real /usr/bin/dpkg 2>/dev/null || true; \
     dpkg-divert --add --rename --divert /usr/bin/dpkg-deb.real /usr/bin/dpkg-deb 2>/dev/null || true; \
     dpkg-divert --add --rename --divert /usr/bin/dpkg-query.real /usr/bin/dpkg-query 2>/dev/null || true; \
-    # Now remove the renamed files
     rm -f /usr/bin/apt.real /usr/bin/apt-get.real /usr/bin/apt-cache.real; \
     rm -f /usr/bin/dpkg.real /usr/bin/dpkg-deb.real /usr/bin/dpkg-query.real; \
     rm -f /usr/bin/aptitude 2>/dev/null || true; \
     rm -f /usr/bin/apt-key 2>/dev/null || true; \
-    # Also remove the original paths if they still exist
     rm -f /usr/bin/apt /usr/bin/apt-get /usr/bin/apt-cache 2>/dev/null || true; \
     rm -f /usr/bin/dpkg /usr/bin/dpkg-deb /usr/bin/dpkg-query 2>/dev/null || true; \
     echo "✓ Package manager binaries removed (apt, dpkg)"; \

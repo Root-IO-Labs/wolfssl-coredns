@@ -154,11 +154,14 @@ kubectl run -it --rm debug --image=busybox --restart=Never -- nslookup kubernete
 ### Stage 3: golang-fips/go Toolchain
 - Clones golang-fips/go repository
 - Applies FIPS patches to Go standard library
+- **Removes ChaCha20-Poly1305** from all crypto/tls source files (comprehensive sed-based removal)
 - Compiles custom Go toolchain (Go 1.24)
 - Routes crypto/* to OpenSSL via CGO
 
 ### Stage 4: CoreDNS v1.13.2
 - Clones CoreDNS v1.13.2 from GitHub
+- Downloads dependencies via `go mod download`
+- **Patches quic-go dependency** to remove ChaCha20 references (prevents build failures)
 - Builds with golang-fips/go (CGO_ENABLED=1)
 - Creates binary: `/coredns`
 
@@ -213,6 +216,43 @@ The following non-FIPS cryptographic libraries are **completely removed**:
 - Kerberos crypto (`libk5crypto3`)
 
 This ensures **100% FIPS compliance** with no bypass paths.
+
+### ChaCha20-Poly1305 Removal
+
+ChaCha20-Poly1305 is a **non-FIPS approved cipher suite** that requires active removal from source code during the build process:
+
+#### Why Removal is Required
+- ChaCha20-Poly1305 is present in golang-fips/go crypto/tls source code
+- ChaCha20-Poly1305 is present in quic-go dependency used by CoreDNS for DoH3 support
+- Without removal, the build fails with: `undefined: tls.TLS_CHACHA20_POLY1305_SHA256`
+- FIPS 140-3 compliance requires only approved cipher suites (AES-GCM, AES-CCM)
+
+#### Removal Implementation
+
+**1. golang-fips/go Patching (Dockerfile.hardened:244-272)**
+- Comprehensive removal from **all .go files** in `src/crypto/tls/`
+- Uses sed-based approach: `sed -i '/TLS_CHACHA20_POLY1305_SHA256/d' *.go`
+- Removes from cipher_suites.go, defaults.go, and all other TLS source files
+- Verification: grep check ensures complete removal before compilation
+
+**2. quic-go Dependency Patching (Dockerfile.hardened:417-442)**
+- Patches quic-go v0.57.0 after `go mod download`
+- Removes from 3 production files:
+  - `internal/handshake/cipher_suite.go`
+  - `internal/handshake/header_protector.go`
+  - `internal/handshake/updatable_aead.go`
+- Removes from 3 test files:
+  - `internal/handshake/hkdf_test.go`
+  - `internal/handshake/updatable_aead_test.go`
+  - `internal/handshake/handshake_helpers_test.go`
+- Verification: grep check ensures no ChaCha20 references remain
+
+#### Result
+After patching and compilation, the final CoreDNS binary:
+- ✅ Contains **zero ChaCha20-Poly1305 references**
+- ✅ Uses only FIPS-approved cipher suites (AES-128-GCM, AES-256-GCM for TLS 1.3)
+- ✅ Builds successfully without "undefined constant" errors
+- ✅ Maintains full DNS-over-TLS, DNS-over-HTTPS, and DoH3 functionality
 
 ## Configuration
 

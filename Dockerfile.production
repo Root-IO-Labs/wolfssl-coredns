@@ -201,9 +201,6 @@ ENV PKG_CONFIG_PATH="${WOLFSSL_PREFIX}/lib/pkgconfig"
 # Copy OpenSSL configuration (same for build and runtime - FIPS-only mode)
 COPY openssl-wolfprov.cnf /tmp/openssl-wolfprov.cnf
 
-# Copy FIPS compliance patch for golang-fips/go
-COPY golang-fips-remove-tls13-chacha20.patch /tmp/golang-fips-remove-tls13-chacha20.patch
-
 # Configure OpenSSL for FIPS-only mode (same config for build and runtime)
 RUN set -eux; \
     ARCH=$(uname -m); \
@@ -228,21 +225,36 @@ RUN set -eux; \
     git submodule update --init --recursive; \
     cd /tmp/go-fips-repo; \
     ./scripts/full-initialize-repo.sh; \
-    echo "Applying FIPS compliance fix: Removing ChaCha20 from TLS 1.3 cipher suites"; \
+    echo ""; \
+    echo "========================================"; \
+    echo "CRITICAL FIX: Removing TLS 1.3 ChaCha20-Poly1305 (Non-FIPS)"; \
+    echo "========================================"; \
+    echo "  - Patch written for upstream Go but applied to golang-fips/go"; \
+    echo "  - golang-fips patches modify cipher_suites.go, causing context mismatch"; \
+    echo "  - Patch failures were silent, not build errors"; \
+    echo ""; \
+    echo "Solution: Use sed to directly remove ALL ChaCha20 references from crypto/tls"; \
+    echo ""; \
     cd /tmp/go-fips-repo/go; \
-    CIPHER_FILE="src/crypto/tls/cipher_suites.go"; \
-    if grep -q "TLS_CHACHA20_POLY1305_SHA256.*aeadChaCha20Poly1305" "$CIPHER_FILE"; then \
-        echo "Found ChaCha20 cipher suite, removing it..."; \
-        sed -i '/TLS_CHACHA20_POLY1305_SHA256.*aeadChaCha20Poly1305/d' "$CIPHER_FILE"; \
-        echo "ChaCha20 cipher suite removed successfully"; \
-    else \
-        echo "WARNING: ChaCha20 cipher suite not found in expected format"; \
+    echo "  - Removing TLS 1.3 ChaCha20-Poly1305 (non-FIPS) from crypto/tls..."; \
+    cd src/crypto/tls; \
+    for file in *.go; do \
+        if [ -f "$file" ]; then \
+            sed -i '/TLS_CHACHA20_POLY1305_SHA256/d' "$file"; \
+        fi; \
+    done; \
+    cd ../../..; \
+    if grep -r "TLS_CHACHA20_POLY1305_SHA256" src/crypto/tls/ 2>/dev/null; then \
+        echo "ERROR: Failed to remove all ChaCha20-Poly1305 references!"; \
+        grep -rn "TLS_CHACHA20_POLY1305_SHA256" src/crypto/tls/ || true; \
+        exit 1; \
     fi; \
+    echo "  ✓ ChaCha20-Poly1305 successfully removed from all crypto/tls files"; \
+    echo "  ✓ TLS 1.3 will only use FIPS-approved AES-GCM cipher suites"; \
+    echo "========================================"; \
+    echo ""; \
     cd /tmp/go-fips-repo/go/src; \
-    CGO_ENABLED=1 \
-    CGO_CFLAGS="-I/usr/include -I${WOLFSSL_PREFIX}/include" \
-    CGO_LDFLAGS="-L/usr/lib/${MULTIARCH} -L${WOLFSSL_PREFIX}/lib" \
-    ./make.bash; \
+    CGO_ENABLED=1 CGO_CFLAGS="-I/usr/include -I${WOLFSSL_PREFIX}/include" CGO_LDFLAGS="-L/usr/lib/${MULTIARCH} -L${WOLFSSL_PREFIX}/lib" ./make.bash; \
     FINAL_GOROOT=/usr/local/go-fips; \
     mv /tmp/go-fips-repo/go ${FINAL_GOROOT}; \
     rm -rf /tmp/go-fips-repo; \
@@ -384,6 +396,37 @@ RUN set -eux; \
     go version; \
     echo "Downloading dependencies..."; \
     go mod download; \
+    echo ""; \
+    echo "========================================"; \
+    echo "CRITICAL FIX: Patching quic-go for FIPS (Remove ChaCha20)"; \
+    echo "========================================"; \
+    echo "Issue: quic-go has hardcoded references to tls.TLS_CHACHA20_POLY1305_SHA256"; \
+    echo "  - This constant was removed from golang-fips/go crypto/tls"; \
+    echo "  - Without patching, CoreDNS build will fail"; \
+    echo ""; \
+    echo "Patching quic-go v0.57.0..."; \
+    QUIC_GO_PATH="/root/go/pkg/mod/github.com/quic-go/quic-go@v0.57.0"; \
+    if [ -d "$QUIC_GO_PATH" ]; then \
+        chmod -R u+w "$QUIC_GO_PATH"; \
+        echo "  - Removing ChaCha20 from production code..."; \
+        sed -i '/TLS_CHACHA20_POLY1305_SHA256/d' "$QUIC_GO_PATH/internal/handshake/cipher_suite.go"; \
+        sed -i '/TLS_CHACHA20_POLY1305_SHA256/d' "$QUIC_GO_PATH/internal/handshake/header_protector.go"; \
+        sed -i '/TLS_CHACHA20_POLY1305_SHA256/d' "$QUIC_GO_PATH/internal/handshake/updatable_aead.go"; \
+        echo "  - Removing ChaCha20 from test files..."; \
+        sed -i 's/tls\.TLS_AES_128_GCM_SHA256, tls\.TLS_AES_256_GCM_SHA384, tls\.TLS_CHACHA20_POLY1305_SHA256/tls.TLS_AES_128_GCM_SHA256, tls.TLS_AES_256_GCM_SHA384/' "$QUIC_GO_PATH/internal/handshake/hkdf_test.go"; \
+        sed -i '/TLS_CHACHA20_POLY1305_SHA256/d' "$QUIC_GO_PATH/internal/handshake/updatable_aead_test.go"; \
+        sed -i '/getCipherSuite(tls\.TLS_CHACHA20_POLY1305_SHA256)/d' "$QUIC_GO_PATH/internal/handshake/handshake_helpers_test.go"; \
+        if grep -r "TLS_CHACHA20_POLY1305_SHA256" "$QUIC_GO_PATH/internal/handshake/" 2>/dev/null; then \
+            echo "ERROR: Failed to remove all ChaCha20 references from quic-go!"; \
+            grep -rn "TLS_CHACHA20_POLY1305_SHA256" "$QUIC_GO_PATH/internal/handshake/" || true; \
+            exit 1; \
+        fi; \
+        echo "  ✓ quic-go patched successfully (production + test files)"; \
+    else \
+        echo "  ℹ️  quic-go not found at expected path, skipping patch"; \
+    fi; \
+    echo "========================================"; \
+    echo ""; \
     echo "Building CoreDNS binary with Ubuntu System OpenSSL..."; \
     CGO_ENABLED=1 \
     CGO_CFLAGS="-I/usr/include -I${WOLFSSL_PREFIX}/include" \
