@@ -229,6 +229,7 @@ RUN set -eux; \
     echo "========================================"; \
     echo "CRITICAL FIX: Removing TLS 1.3 ChaCha20-Poly1305 (Non-FIPS)"; \
     echo "========================================"; \
+    echo "Background: Previous patch file approach was problematic"; \
     echo "  - Patch written for upstream Go but applied to golang-fips/go"; \
     echo "  - golang-fips patches modify cipher_suites.go, causing context mismatch"; \
     echo "  - Patch failures were silent, not build errors"; \
@@ -389,7 +390,57 @@ RUN set -eux; \
     cd /tmp/coredns; \
     echo "Updating expr-lang/expr dependency to v1.17.7..."; \
     sed -i 's|github.com/expr-lang/expr v1.17.6|github.com/expr-lang/expr v1.17.7|g' go.mod; \
-    echo "Disabling FIPS mode for build (will be enabled at runtime)..."; \
+    echo ""; \
+    echo "========================================"; \
+    echo "FIPS COMPLIANCE: Remove Non-FIPS Plugins"; \
+    echo "========================================"; \
+    echo "Removing Azure plugin (contains pkcs12/RC2 cipher)..."; \
+    if [ -d "plugin/azure" ]; then \
+        rm -rf plugin/azure; \
+        echo "  ✓ Removed plugin/azure directory"; \
+    else \
+        echo "  ℹ️  plugin/azure directory not found"; \
+    fi; \
+    echo ""; \
+    echo "Removing CloudDNS plugin (brings ChaCha20 via google.golang.org/api)..."; \
+    if [ -d "plugin/clouddns" ]; then \
+        rm -rf plugin/clouddns; \
+        echo "  ✓ Removed plugin/clouddns directory"; \
+    else \
+        echo "  ℹ️  plugin/clouddns directory not found"; \
+    fi; \
+    echo ""; \
+    echo "Removing plugin imports from core code..."; \
+    if [ -f "core/plugin/zplugin.go" ]; then \
+        sed -i '/plugin\/azure/d' core/plugin/zplugin.go; \
+        sed -i '/plugin\/clouddns/d' core/plugin/zplugin.go; \
+        echo "  ✓ Removed plugin imports from core/plugin/zplugin.go"; \
+    fi; \
+    if [ -f "core/dnsserver/register.go" ]; then \
+        sed -i '/plugin\/azure/d' core/dnsserver/register.go; \
+        sed -i '/plugin\/clouddns/d' core/dnsserver/register.go; \
+        echo "  ✓ Removed plugin imports from core/dnsserver/register.go"; \
+    fi; \
+    echo "  ✓ Non-FIPS plugin references removed from core code"; \
+    echo "========================================"; \
+    echo ""; \
+    echo "========================================"; \
+    echo "CRITICAL: Temporarily Disabling FIPS Mode for Build Operations"; \
+    echo "========================================"; \
+    echo "Issue: golang-fips/go with GOLANG_FIPS=1 causes TLS verification failures"; \
+    echo "  Error: 'tls: invalid signature by the server certificate: ECDSA verification failure'"; \
+    echo "  Affects: Downloads from proxy.golang.org during go mod operations"; \
+    echo ""; \
+    echo "Root Cause:"; \
+    echo "  - golang-fips/go routes TLS operations through OpenSSL in FIPS mode"; \
+    echo "  - Build-time ECDSA certificate validation fails with FIPS enforcement"; \
+    echo "  - Prevents downloading dependencies from Go proxy"; \
+    echo ""; \
+    echo "Solution:"; \
+    echo "  - Temporarily unset GOLANG_FIPS during build (go mod tidy/download)"; \
+    echo "  - Runtime image re-enables FIPS mode (ENV GOLANG_FIPS=1 in Stage 4)"; \
+    echo "  - This ensures: dependencies download successfully + runtime enforces FIPS"; \
+    echo ""; \
     unset GOLANG_FIPS; \
     go mod tidy; \
     echo "Building CoreDNS v1.13.2 with FIPS Go..."; \

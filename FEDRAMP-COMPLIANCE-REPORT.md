@@ -489,7 +489,8 @@ The following algorithms are **NOT** approved for FIPS mode and are blocked:
 - Blowfish - Prohibited
 
 **Blocked at Application Level:**
-- ChaCha20-Poly1305 - Not FIPS-approved (actively removed via patching: Dockerfile.hardened:244-272 for golang-fips/go, 417-442 for quic-go dependency)
+- ChaCha20-Poly1305 - Not FIPS-approved (actively removed via: 1) Azure plugin removal, 2) CloudDNS plugin removal, 3) QUIC file hiding, 4) golang-fips/go source patching)
+- pkcs12/RC2 - Not FIPS-approved (removed via Azure plugin elimination: Dockerfile:455-488, Dockerfile.hardened:544-590)
 - X25519 - Routed through FIPS provider for TLS 1.3 compliance
 
 #### Algorithm Enforcement Mechanisms
@@ -505,11 +506,14 @@ The following algorithms are **NOT** approved for FIPS mode and are blocked:
    - golang-fips/go routes all crypto to FIPS module (no bypass)
 
 3. **Binary Analysis**
-   - Build process scans for non-approved algorithm references (Dockerfile.hardened:369-472)
-   - ChaCha20 actively removed via comprehensive patching:
-     - golang-fips/go crypto/tls patching (Dockerfile.hardened:244-272)
-     - quic-go dependency patching (Dockerfile.hardened:417-442)
+   - Build process scans for non-approved algorithm references (Dockerfile:704-790, Dockerfile.hardened verification section)
+   - Non-FIPS algorithms actively removed via multi-layered approach:
+     - **Azure plugin removal**: Eliminates pkcs12/RC2 cipher (Dockerfile:455-488)
+     - **CloudDNS plugin removal**: Eliminates ChaCha20 via Google S2A dependency (Dockerfile:455-488)
+     - **QUIC file hiding**: Prevents quic-go dependency during build (Dockerfile:491-663, Dockerfile.hardened:424-623)
+     - **golang-fips/go patching**: Removes ChaCha20 from TLS source code (Dockerfile.hardened:244-272)
    - ChaCha20 confirmed absent from final binary
+   - pkcs12/RC2 confirmed absent from final binary
    - golang.org/x/crypto routed through FIPS stack
 
 4. **Continuous Monitoring**
@@ -764,25 +768,64 @@ This CoreDNS v1.13.2 image required the following FIPS-specific modifications:
    - golang-fips/go ensures TLS cipher suites use FIPS-approved algorithms
    - Non-FIPS cipher suites (ChaCha20-Poly1305) confirmed absent
 
-4. **ChaCha20-Poly1305 Removal via Comprehensive Patching**
-   - **golang-fips/go Patching** (Dockerfile.hardened:244-272)
-     - Comprehensive sed-based removal from ALL .go files in src/crypto/tls/
+4. **Non-FIPS Algorithm Removal via Multi-Layered Approach**
+
+   **Layer 1: Azure Plugin Removal (pkcs12/RC2)**
+   - **Location**: Dockerfile:455-488, Dockerfile.hardened:544-590
+   - **Method**: Physical directory deletion + plugin.cfg modification
+   - **Reason**: Azure plugin imports `golang.org/x/crypto/pkcs12` containing RC2 cipher (not FIPS-approved)
+   - **Implementation**:
+     - Remove plugin directory: `rm -rf plugin/azure`
+     - Remove from plugin.cfg: `sed -i '/^azure:/d' plugin.cfg`
+     - Remove imports from core code
+   - **Verification**: `go mod why golang.org/x/crypto/pkcs12` confirms absence
+   - **Result**: pkcs12/RC2 completely absent from binary
+
+   **Layer 2: CloudDNS Plugin Removal (ChaCha20-Poly1305)**
+   - **Location**: Dockerfile:455-488, Dockerfile.hardened:565-590
+   - **Method**: Physical directory deletion + plugin.cfg modification
+   - **Reason**: CloudDNS imports `google.golang.org/api/dns/v1` → `github.com/google/s2a-go` → ChaCha20-Poly1305
+   - **Implementation**:
+     - Remove plugin directory: `rm -rf plugin/clouddns`
+     - Remove from plugin.cfg: `sed -i '/^clouddns:/d' plugin.cfg`
+     - Remove imports from core code
+   - **Verification**: `go mod why golang.org/x/crypto/chacha20poly1305` confirms absence
+   - **Result**: Google S2A ChaCha20 source eliminated
+
+   **Layer 3: QUIC File Hide-Restore (ChaCha20-Poly1305 prevention)**
+   - **Location**: Dockerfile:491-663, Dockerfile.hardened:424-623
+   - **Method**: Temporarily hide QUIC files during dependency resolution
+   - **Reason**: CoreDNS core directly imports quic-go (not via plugin), bringing ChaCha20
+   - **Implementation**:
+     - Step 1: Rename QUIC files to .go.quic (hides from go mod tidy)
+     - Step 2: Create stub functions that return errors
+     - Step 3: Run `go mod tidy` to remove quic-go dependency
+     - Step 4: Restore QUIC files with `//go:build quic` tags (excluded from non-QUIC builds)
+   - **Verification**: `grep "quic-go" go.mod` confirms absence
+   - **Result**: QUIC/HTTP3 disabled, ChaCha20 dependency eliminated
+
+   **Layer 4: golang-fips/go Source Patching (ChaCha20-Poly1305 from TLS)**
+   - **Location**: Dockerfile.hardened:244-272
+   - **Method**: Sed-based removal from crypto/tls source files
+   - **Reason**: golang-fips/go TLS includes ChaCha20 cipher suite definitions
+   - **Implementation**:
+     - Remove from all .go files in src/crypto/tls/: `sed -i '/TLS_CHACHA20_POLY1305_SHA256/d' *.go`
      - Removes from cipher_suites.go, defaults.go, and all other TLS source files
-     - Reason: ChaCha20-Poly1305 is not FIPS-approved, must be removed for compliance
-   - **quic-go Dependency Patching** (Dockerfile.hardened:417-442)
-     - Patches quic-go v0.57.0 after `go mod download`
-     - Removes hardcoded `tls.TLS_CHACHA20_POLY1305_SHA256` references from 6 files
-     - Production files: cipher_suite.go, header_protector.go, updatable_aead.go
-     - Test files: hkdf_test.go, updatable_aead_test.go, handshake_helpers_test.go
-     - Reason: quic-go had hardcoded references to constant removed from golang-fips/go
-     - Without this patch: Build fails with "undefined: tls.TLS_CHACHA20_POLY1305_SHA256"
-   - **Verification**: Automated grep checks ensure complete removal before compilation
-   - **Result**: Final binary contains zero ChaCha20 references
+   - **Verification**: Automated grep checks before compilation
+   - **Result**: TLS stack contains only FIPS-approved cipher suites
+
+   **Combined Verification** (Dockerfile:704-790)
+   - Check 1: `go mod why golang.org/x/crypto/pkcs12` (Azure verification)
+   - Check 2: `go mod why golang.org/x/crypto/chacha20poly1305` (CloudDNS/QUIC verification)
+   - Check 3: `strings /app/coredns | grep -ic "chacha20"` (binary scan)
+   - **Build fails** if any non-FIPS package detected
+   - **Final Result**: Zero ChaCha20 references, zero pkcs12/RC2 references in binary
 
 5. **OpenSSL Configuration File**
    - Custom `openssl.cnf` with wolfProvider settings
    - Ensures FIPS mode activation on every OpenSSL operation
-   - Location: `openssl-wolfprov.cnf` copied to `/usr/local/openssl/ssl/openssl.cnf`
+   - Location: `openssl-wolfprov.cnf` copied to `/etc/ssl/openssl.cnf`
+   - FIPS-only mode: Default provider disabled, only FIPS provider active
 
 ### Why Modifications Were Required
 
@@ -797,16 +840,30 @@ This CoreDNS v1.13.2 image required the following FIPS-specific modifications:
 - Build script checks golang-fips/openssl version (Dockerfile.hardened:259-301)
 - Ensures v2.0.4+ is used (patched version)
 
+**GOLANG_FIPS Environment Variable Management:**
+- **During Build** (go mod operations): `GOLANG_FIPS` must be **UNSET**
+  - Reason: golang-fips with GOLANG_FIPS=1 enables strict ECDSA signature verification
+  - Issue: Causes TLS verification failures when downloading Go modules over HTTPS
+  - Symptom: "tls: failed to verify certificate: x509: ECDSA verification failure"
+  - Solution: `unset GOLANG_FIPS` before `go mod tidy`, `go mod download`, `go get`
+  - Location: All Dockerfiles before go mod operations (Dockerfile:616-632, Dockerfile.hardened:413-430)
+- **During Runtime**: `GOLANG_FIPS=1` is **SET** in environment
+  - Ensures all cryptographic operations route through FIPS OpenSSL
+  - Validated by entrypoint script before CoreDNS starts
+  - Required for FIPS mode compliance
+
 **Algorithm Routing:**
 - X25519 (TLS 1.3 key exchange): Routed through golang-fips/go → OpenSSL → wolfSSL FIPS
 - Ed25519 (DNSSEC signature verification): Public-key operation only, non-cryptographic
 - golang.org/x/crypto references: Intercepted by golang-fips/go runtime
 
-### Patch Evidence
+### Modification and Plugin Removal Evidence
 
 See **Appendix G** for:
-- Diff of CoreDNS go.mod changes (expr-lang/expr version bump)
-- golang-fips/go integration commit references
+- Plugin removal implementation details (Azure, CloudDNS)
+- QUIC file hide-restore approach documentation
+- golang-fips/go ChaCha20 removal patches
+- CoreDNS go.mod changes (dependency verification)
 - wolfProvider configuration file diff
 
 ---

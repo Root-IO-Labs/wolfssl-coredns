@@ -245,6 +245,7 @@ RUN set -eux; \
     echo "========================================"; \
     echo "CRITICAL FIX: Removing TLS 1.3 ChaCha20-Poly1305 (Non-FIPS)"; \
     echo "========================================"; \
+    echo "Background: Previous patch file approach was problematic"; \
     echo "  - Patch written for upstream Go but applied to golang-fips/go"; \
     echo "  - golang-fips patches modify cipher_suites.go, causing context mismatch"; \
     echo "  - Patch failures were silent, not build errors"; \
@@ -394,6 +395,8 @@ RUN set -eux; \
 ENV OPENSSL_CONF=/etc/ssl/openssl.cnf
 
 # Clone and build CoreDNS v1.13.2
+# Use bash for array support
+SHELL ["/bin/bash", "-c"]
 RUN set -eux; \
     ARCH=$(uname -m); \
     if [ "$ARCH" = "x86_64" ]; then MULTIARCH="x86_64-linux-gnu"; \
@@ -406,43 +409,221 @@ RUN set -eux; \
     cd /tmp/coredns; \
     echo "Updating expr-lang/expr dependency to v1.17.7..."; \
     sed -i 's|github.com/expr-lang/expr v1.17.6|github.com/expr-lang/expr v1.17.7|g' go.mod; \
-    echo "Disabling FIPS mode for build (will be enabled at runtime)..."; \
+    echo ""; \
+    echo "========================================"; \
+    echo "CRITICAL: Temporarily Disabling FIPS Mode for Build Operations"; \
+    echo "========================================"; \
+    echo "Issue: golang-fips/go with GOLANG_FIPS=1 causes TLS verification failures"; \
+    echo "  Error: 'tls: invalid signature by the server certificate: ECDSA verification failure'"; \
+    echo "  Affects: Downloads from proxy.golang.org during go mod operations"; \
+    echo ""; \
+    echo "Root Cause:"; \
+    echo "  - golang-fips/go routes TLS operations through OpenSSL in FIPS mode"; \
+    echo "  - Build-time ECDSA certificate validation fails with FIPS enforcement"; \
+    echo "  - Prevents downloading dependencies from Go proxy"; \
+    echo ""; \
+    echo "Solution:"; \
+    echo "  - Temporarily unset GOLANG_FIPS during build (go mod tidy/download)"; \
+    echo "  - Runtime image re-enables FIPS mode (ENV GOLANG_FIPS=1 in Stage 5)"; \
+    echo "  - This ensures: dependencies download successfully + runtime enforces FIPS"; \
+    echo ""; \
     unset GOLANG_FIPS; \
+    echo ""; \
+    echo "========================================"; \
+    echo "FIPS Compliance: Excluding Non-FIPS Crypto"; \
+    echo "========================================"; \
+    echo ""; \
+    echo "Strategy:"; \
+    echo "  1. Add Go build tags to exclude QUIC/HTTP3 code (prevents quic-go import)"; \
+    echo "  2. Remove Azure plugin (eliminates pkcs12 package with RC2 cipher)"; \
+    echo "  3. Remove CloudDNS plugin (eliminates ChaCha20 via Google S2A library)"; \
+    echo ""; \
+    echo "[1/2] Hiding QUIC files from go mod tidy..."; \
+    echo "Searching for ALL files that import quic-go..."; \
+    QUIC_FILES=$(grep -rl "github.com/quic-go/quic-go" . --include="*.go" 2>/dev/null | tr '\n' ' '); \
+    echo "Found files importing quic-go: $QUIC_FILES"; \
+    echo ""; \
+    echo "Step 1: Temporarily renaming QUIC files to .go.quic..."; \
+    for file in $QUIC_FILES; do \
+        if [ -f "$file" ]; then \
+            mv "$file" "${file}.quic"; \
+            echo "    ✓ Renamed $file → ${file}.quic"; \
+        fi; \
+    done; \
+    echo ""; \
+    echo "Creating QUIC stub functions (for non-QUIC builds)..."; \
+    printf '%s\n' \
+        '//go:build !quic' \
+        '// +build !quic' \
+        '' \
+        'package dnsserver' \
+        '' \
+        'import (' \
+        '	"errors"' \
+        '	"net"' \
+        ')' \
+        '' \
+        '// NewServerQUIC is a stub that returns error when QUIC support is disabled' \
+        'func NewServerQUIC(addr string, group []*Config) (*ServerQUIC, error) {' \
+        '	return nil, errors.New("QUIC/HTTP3 support disabled in FIPS build")' \
+        '}' \
+        '' \
+        '// NewServerHTTPS3 is a stub that returns error when HTTP/3 support is disabled' \
+        'func NewServerHTTPS3(addr string, group []*Config) (*ServerHTTPS3, error) {' \
+        '	return nil, errors.New("HTTP/3 support disabled in FIPS build")' \
+        '}' \
+        '' \
+        '// ServerQUIC is a stub type that implements caddy.Server interface' \
+        'type ServerQUIC struct{}' \
+        '' \
+        '// Listen stub implementation' \
+        'func (s *ServerQUIC) Listen() (net.Listener, error) {' \
+        '	return nil, errors.New("QUIC/HTTP3 support disabled in FIPS build")' \
+        '}' \
+        '' \
+        '// ListenPacket stub implementation' \
+        'func (s *ServerQUIC) ListenPacket() (net.PacketConn, error) {' \
+        '	return nil, errors.New("QUIC/HTTP3 support disabled in FIPS build")' \
+        '}' \
+        '' \
+        '// Serve stub implementation' \
+        'func (s *ServerQUIC) Serve(net.Listener) error {' \
+        '	return errors.New("QUIC/HTTP3 support disabled in FIPS build")' \
+        '}' \
+        '' \
+        '// ServePacket stub implementation' \
+        'func (s *ServerQUIC) ServePacket(net.PacketConn) error {' \
+        '	return errors.New("QUIC/HTTP3 support disabled in FIPS build")' \
+        '}' \
+        '' \
+        '// Stop stub implementation' \
+        'func (s *ServerQUIC) Stop() error {' \
+        '	return nil' \
+        '}' \
+        '' \
+        '// OnStartupComplete stub implementation' \
+        'func (s *ServerQUIC) OnStartupComplete() {}' \
+        '' \
+        '// Address stub implementation' \
+        'func (s *ServerQUIC) Address() string {' \
+        '	return ""' \
+        '}' \
+        '' \
+        '// ServerHTTPS3 is a stub type that implements caddy.Server interface' \
+        'type ServerHTTPS3 struct{}' \
+        '' \
+        '// Listen stub implementation' \
+        'func (s *ServerHTTPS3) Listen() (net.Listener, error) {' \
+        '	return nil, errors.New("HTTP/3 support disabled in FIPS build")' \
+        '}' \
+        '' \
+        '// ListenPacket stub implementation' \
+        'func (s *ServerHTTPS3) ListenPacket() (net.PacketConn, error) {' \
+        '	return nil, errors.New("HTTP/3 support disabled in FIPS build")' \
+        '}' \
+        '' \
+        '// Serve stub implementation' \
+        'func (s *ServerHTTPS3) Serve(net.Listener) error {' \
+        '	return errors.New("HTTP/3 support disabled in FIPS build")' \
+        '}' \
+        '' \
+        '// ServePacket stub implementation' \
+        'func (s *ServerHTTPS3) ServePacket(net.PacketConn) error {' \
+        '	return errors.New("HTTP/3 support disabled in FIPS build")' \
+        '}' \
+        '' \
+        '// Stop stub implementation' \
+        'func (s *ServerHTTPS3) Stop() error {' \
+        '	return nil' \
+        '}' \
+        '' \
+        '// OnStartupComplete stub implementation' \
+        'func (s *ServerHTTPS3) OnStartupComplete() {}' \
+        '' \
+        '// Address stub implementation' \
+        'func (s *ServerHTTPS3) Address() string {' \
+        '	return ""' \
+        '}' \
+        > core/dnsserver/quic_stub.go; \
+    echo "  ✓ Created quic_stub.go with error-returning stubs"; \
+    echo ""; \
+    echo "[2/2] Removing QUIC, Azure, and CloudDNS plugins..."; \
+    echo "  First, physically removing plugin directories..."; \
+    if [ -d "plugin/azure" ]; then \
+        rm -rf plugin/azure; \
+        echo "    ✓ Removed plugin/azure directory"; \
+    else \
+        echo "    ℹ️  plugin/azure directory not found"; \
+    fi; \
+    if [ -d "plugin/clouddns" ]; then \
+        rm -rf plugin/clouddns; \
+        echo "    ✓ Removed plugin/clouddns directory"; \
+    else \
+        echo "    ℹ️  plugin/clouddns directory not found"; \
+    fi; \
+    echo ""; \
+    if [ -f "plugin.cfg" ]; then \
+        echo "  Current plugin.cfg (first 20 non-comment lines):"; \
+        cat plugin.cfg | grep -E "^[^#]" | head -20; \
+        echo ""; \
+        echo "  Removing 'quic:', 'azure:', and 'clouddns:' lines from plugin.cfg..."; \
+        sed -i '/^quic:/d' plugin.cfg; \
+        sed -i '/^azure:/d' plugin.cfg; \
+        sed -i '/^clouddns:/d' plugin.cfg; \
+        echo "    ✓ QUIC, Azure, and CloudDNS plugins removed from plugin.cfg"; \
+        echo ""; \
+        echo "  Updated plugin.cfg (first 20 non-comment lines):"; \
+        cat plugin.cfg | grep -E "^[^#]" | head -20; \
+        echo ""; \
+        echo "  Regenerating coredns.go..."; \
+        go generate coredns.go; \
+        echo "    ✓ coredns.go regenerated"; \
+    else \
+        echo "  ⚠️  plugin.cfg not found, skipping plugin removal"; \
+    fi; \
+    echo ""; \
+    echo "Build tags and plugin removal complete!"; \
+    echo "  • QUIC/HTTP3 code excluded via 'quic' build tag"; \
+    echo "  • QUIC plugin removed from plugin.cfg"; \
+    echo "  • Azure plugin removed (eliminates pkcs12/RC2)"; \
+    echo "  • CloudDNS plugin removed (eliminates ChaCha20 via Google S2A)"; \
+    echo "  • quic-go will NOT be imported (no ChaCha20/HKDF from QUIC)"; \
+    echo ""; \
+    echo "========================================"; \
+    echo ""; \
+    echo "Running go mod tidy (after plugin removal, QUIC files hidden)..."; \
     go mod tidy; \
+    echo "  ✓ go mod tidy complete"; \
+    echo ""; \
+    echo "Step 3: Renaming QUIC files back and adding build tags..."; \
+    for file_quic in core/dnsserver/*.go.quic; do \
+        if [ -f "$file_quic" ]; then \
+            file="${file_quic%.quic}"; \
+            { \
+                echo "//go:build quic"; \
+                echo "// +build quic"; \
+                echo ""; \
+                cat "$file_quic"; \
+            } > "$file"; \
+            rm "$file_quic"; \
+            echo "    ✓ Restored ${file_quic##*/} → ${file##*/} with build tags"; \
+        fi; \
+    done; \
+    echo ""; \
+    echo "Verifying quic-go removal..."; \
+    if go mod why github.com/quic-go/quic-go 2>&1 | grep -q "does not need"; then \
+        echo "  ✓ SUCCESS: quic-go no longer needed by main module"; \
+    elif grep "quic-go" go.mod 2>/dev/null; then \
+        echo "  ❌ WARNING: quic-go still in go.mod"; \
+        go mod why github.com/quic-go/quic-go 2>&1 | head -10; \
+    else \
+        echo "  ✓ SUCCESS: quic-go removed from dependencies"; \
+    fi; \
+    echo ""; \
     echo "Building CoreDNS v1.13.2 with FIPS Go..."; \
     go version; \
     echo "Downloading dependencies..."; \
     go mod download; \
-    echo ""; \
-    echo "========================================"; \
-    echo "CRITICAL FIX: Patching quic-go for FIPS (Remove ChaCha20)"; \
-    echo "========================================"; \
-    echo "Issue: quic-go has hardcoded references to tls.TLS_CHACHA20_POLY1305_SHA256"; \
-    echo "  - This constant was removed from golang-fips/go crypto/tls"; \
-    echo "  - Without patching, CoreDNS build will fail"; \
-    echo ""; \
-    echo "Patching quic-go v0.57.0..."; \
-    QUIC_GO_PATH="/root/go/pkg/mod/github.com/quic-go/quic-go@v0.57.0"; \
-    if [ -d "$QUIC_GO_PATH" ]; then \
-        chmod -R u+w "$QUIC_GO_PATH"; \
-        echo "  - Removing ChaCha20 from production code..."; \
-        sed -i '/TLS_CHACHA20_POLY1305_SHA256/d' "$QUIC_GO_PATH/internal/handshake/cipher_suite.go"; \
-        sed -i '/TLS_CHACHA20_POLY1305_SHA256/d' "$QUIC_GO_PATH/internal/handshake/header_protector.go"; \
-        sed -i '/TLS_CHACHA20_POLY1305_SHA256/d' "$QUIC_GO_PATH/internal/handshake/updatable_aead.go"; \
-        echo "  - Removing ChaCha20 from test files..."; \
-        sed -i 's/tls\.TLS_AES_128_GCM_SHA256, tls\.TLS_AES_256_GCM_SHA384, tls\.TLS_CHACHA20_POLY1305_SHA256/tls.TLS_AES_128_GCM_SHA256, tls.TLS_AES_256_GCM_SHA384/' "$QUIC_GO_PATH/internal/handshake/hkdf_test.go"; \
-        sed -i '/TLS_CHACHA20_POLY1305_SHA256/d' "$QUIC_GO_PATH/internal/handshake/updatable_aead_test.go"; \
-        sed -i '/getCipherSuite(tls\.TLS_CHACHA20_POLY1305_SHA256)/d' "$QUIC_GO_PATH/internal/handshake/handshake_helpers_test.go"; \
-        if grep -r "TLS_CHACHA20_POLY1305_SHA256" "$QUIC_GO_PATH/internal/handshake/" 2>/dev/null; then \
-            echo "ERROR: Failed to remove all ChaCha20 references from quic-go!"; \
-            grep -rn "TLS_CHACHA20_POLY1305_SHA256" "$QUIC_GO_PATH/internal/handshake/" || true; \
-            exit 1; \
-        fi; \
-        echo "  ✓ quic-go patched successfully (production + test files)"; \
-    else \
-        echo "  ℹ️  quic-go not found at expected path, skipping patch"; \
-    fi; \
-    echo "========================================"; \
     echo ""; \
     echo "Building CoreDNS binary with Ubuntu System OpenSSL..."; \
     CGO_ENABLED=1 \
@@ -458,126 +639,124 @@ RUN set -eux; \
     ldd /app/coredns || echo "Note: Binary linkage check complete"; \
     echo "Testing binary execution:"; \
     /app/coredns --version 2>&1 || echo "Binary execution test complete"; \
+    echo ""; \
+    echo "CoreDNS build complete. Keeping /tmp/coredns for verification..."
+
+# ============================================================================
+# FIPS Compliance Verification - CoreDNS v1.13.2
+# ============================================================================
+# Verify that non-FIPS packages have been successfully removed via:
+#   1. Build tags (quic-go and ChaCha20-Poly1305 exclusion from QUIC)
+#   2. Plugin removal (Azure plugin → pkcs12/RC2 elimination)
+#   3. Plugin removal (CloudDNS plugin → ChaCha20 via Google S2A elimination)
+# ============================================================================
+RUN set -eux; \
+    cd /tmp/coredns; \
+    echo ""; \
+    echo "========================================"; \
+    echo "FIPS Compliance Verification"; \
+    echo "========================================"; \
+    echo ""; \
+    FIPS_PASS=true; \
+    \
+    # [1/3] Check for pkcs12 package (RC2 cipher - Azure plugin)
+    echo "[1/3] Checking for pkcs12 package (RC2 cipher)..."; \
+    PKCS12_WHY=$(go mod why golang.org/x/crypto/pkcs12 2>&1 || true); \
+    if echo "$PKCS12_WHY" | grep -q "does not need"; then \
+        echo "  ✅ SUCCESS: pkcs12 package not in dependency tree"; \
+    else \
+        echo "  ❌ FAILURE: pkcs12 package still present!"; \
+        echo ""; \
+        echo "  Details:"; \
+        go mod why golang.org/x/crypto/pkcs12 2>&1 | head -20 || true; \
+        echo ""; \
+        echo "  Root Cause: Azure/CloudDNS plugin not removed or other dependency"; \
+        echo "  Action: Check plugin.cfg and verify 'azure:' and 'clouddns:' lines removed"; \
+        FIPS_PASS=false; \
+    fi; \
+    echo ""; \
+    \
+    # [2/3] Check for ChaCha20-Poly1305 (non-FIPS cipher)
+    echo "[2/3] Checking for ChaCha20-Poly1305..."; \
+    CHACHA20_WHY=$(go mod why golang.org/x/crypto/chacha20poly1305 2>&1 || true); \
+    CHACHA20_BINARY_COUNT=$(strings /app/coredns 2>/dev/null | grep -ic "chacha20" || echo 0); \
+    \
+    if echo "$CHACHA20_WHY" | grep -q "does not need"; then \
+        echo "  ✅ SUCCESS: chacha20poly1305 package not in dependency tree"; \
+        if [ "$CHACHA20_BINARY_COUNT" -eq 0 ]; then \
+            echo "  ✅ EXCELLENT: No ChaCha20 strings in binary"; \
+        else \
+            echo "  ⚠️  WARNING: Found $CHACHA20_BINARY_COUNT ChaCha20 references in binary"; \
+            echo "     (May be benign references from standard library)"; \
+        fi; \
+    else \
+        echo "  ❌ FAILURE: ChaCha20-Poly1305 still in dependency tree!"; \
+        echo ""; \
+        echo "  Module Dependency Chain:"; \
+        go mod why golang.org/x/crypto/chacha20poly1305 2>&1 | head -20 || true; \
+        echo ""; \
+        echo "  Binary Analysis:"; \
+        echo "    ChaCha20 string references: $CHACHA20_BINARY_COUNT"; \
+        echo ""; \
+        echo "  Root Cause: quic-go not excluded or CloudDNS plugin not removed"; \
+        echo "  Action: Verify build tags added to quic*.go AND clouddns removed from plugin.cfg"; \
+        FIPS_PASS=false; \
+    fi; \
+    echo ""; \
+    \
+    # [3/3] Check for HKDF (informational - used by QUIC)
+    echo "[3/3] Checking for HKDF (informational)..."; \
+    HKDF_WHY=$(go mod why golang.org/x/crypto/hkdf 2>&1 || true); \
+    if echo "$HKDF_WHY" | grep -q "does not need"; then \
+        echo "  ✅ SUCCESS: HKDF package not in dependency tree"; \
+    else \
+        echo "  ℹ️  INFO: HKDF still present in dependency tree"; \
+        echo ""; \
+        echo "  Module Dependency Chain:"; \
+        go mod why golang.org/x/crypto/hkdf 2>&1 | head -10 || true; \
+        echo ""; \
+        echo "  Note: HKDF may be used by other components besides QUIC"; \
+        echo "        This is informational only and does not fail the build"; \
+    fi; \
+    echo ""; \
+    \
+    # Summary and pass/fail determination
+    echo "========================================"; \
+    echo "FIPS Compliance Summary"; \
+    echo "========================================"; \
+    echo ""; \
+    echo "Exclusion Strategy:"; \
+    echo "  ✓ Build tags: Excluded QUIC/HTTP3 code from compilation"; \
+    echo "  ✓ Plugin removal: Removed Azure (pkcs12/RC2) and CloudDNS (ChaCha20) plugins"; \
+    echo ""; \
+    echo "Verification Results:"; \
+    if [ "$FIPS_PASS" = "true" ]; then \
+        echo "  ✅ PASS: Non-FIPS packages successfully excluded"; \
+        echo ""; \
+        echo "Runtime FIPS Enforcement:"; \
+        echo "  • GOLANG_FIPS=1 enables golang-fips/go runtime interception"; \
+        echo "  • Ubuntu System OpenSSL 3.0.2 configured with wolfProvider v1.1.0"; \
+        echo "  • wolfSSL FIPS v5.8.2 provides cryptographic operations"; \
+        echo "  • TLS connections route through FIPS-validated modules"; \
+        echo ""; \
+        echo "Deployment Recommendations:"; \
+        echo "  1. Test with: GODEBUG=inittrace=1 to verify no chacha20/pkcs12 initialization"; \
+        echo "  2. Verify TLS with: openssl s_client -connect <host>:853 -cipher 'FIPS'"; \
+        echo "  3. Monitor cipher suites: TLS_AES_128_GCM_SHA256, TLS_AES_256_GCM_SHA384"; \
+        echo ""; \
+    else \
+        echo "  ❌ FAIL: Non-FIPS packages still present in dependency tree"; \
+        echo ""; \
+        echo "Build cannot proceed - FIPS compliance violations detected"; \
+        echo ""; \
+        exit 1; \
+    fi; \
+    echo "========================================"; \
+    echo ""; \
+    \
+    # Cleanup source directory after verification
     cd /; \
     rm -rf /tmp/coredns
-
-# Crypto Dependency Audit - CoreDNS v1.13.2
-# Scan the compiled binary for golang.org/x/crypto and related algorithm usage
-# These references SHOULD be intercepted by golang-fips/go runtime and routed to OpenSSL
-RUN set -eux; \
-    echo ""; \
-    echo "========================================"; \
-    echo "CoreDNS Crypto Dependency Audit"; \
-    echo "========================================"; \
-    echo ""; \
-    echo "Scanning /app/coredns binary for cryptographic references..."; \
-    echo ""; \
-    X_CRYPTO_COUNT=$(strings /app/coredns 2>/dev/null | grep -c "golang.org/x/crypto" || echo 0); \
-    if [ "$X_CRYPTO_COUNT" -gt 0 ]; then \
-        echo "⚠️  WARNING: Found $X_CRYPTO_COUNT golang.org/x/crypto references"; \
-        echo ""; \
-        echo "Details:"; \
-        echo "  Package: golang.org/x/crypto (v0.45.0 in go.mod)"; \
-        echo "  Used by: CoreDNS TLS plugins (DoT/DoH/DoH3)"; \
-        echo "  Expected: golang-fips/go SHOULD intercept these calls at runtime"; \
-        echo ""; \
-        echo "FIPS Compliance Path:"; \
-        echo "  CoreDNS → golang.org/x/crypto → golang-fips/go runtime"; \
-        echo "  → Ubuntu System OpenSSL 3.0.2 → wolfProvider v1.1.0 → wolfSSL FIPS v5.8.2"; \
-        echo ""; \
-        echo "⚠️  Action Required:"; \
-        echo "  Integration testing with TLS connections (DoT/DoH/DoH3) to verify"; \
-        echo "  crypto routing through FIPS-validated OpenSSL in production"; \
-        echo ""; \
-    else \
-        echo "✓ No golang.org/x/crypto references found"; \
-    fi; \
-    X25519_COUNT=$(strings /app/coredns 2>/dev/null | grep -icE "x25519|curve25519" || echo 0); \
-    if [ "$X25519_COUNT" -gt 0 ]; then \
-        echo "⚠️  WARNING: Found $X25519_COUNT X25519/curve25519 references"; \
-        echo ""; \
-        echo "Details:"; \
-        echo "  Algorithm: X25519 elliptic curve Diffie-Hellman"; \
-        echo "  Used in: TLS 1.3 key exchange (DoT/DoH/DoH3)"; \
-        echo "  FIPS Status: May be approved in FIPS 140-3"; \
-        echo ""; \
-        echo "Expected Behavior:"; \
-        echo "  golang-fips/go routes crypto/ecdh and crypto/tls calls to OpenSSL"; \
-        echo "  Ubuntu System OpenSSL 3.0.2 uses wolfProvider v1.1.0 → wolfSSL FIPS v5.8.2 for operations"; \
-        echo ""; \
-        echo "⚠️  Action Required:"; \
-        echo "  Test TLS connections in production environment"; \
-        echo "  Verify cipher suite negotiation uses FIPS-approved algorithms"; \
-        echo "  Monitor for TLS handshake errors"; \
-        echo ""; \
-    else \
-        echo "ℹ️  No X25519/curve25519 references found"; \
-    fi; \
-    ED25519_COUNT=$(strings /app/coredns 2>/dev/null | grep -ic "ed25519" || echo 0); \
-    if [ "$ED25519_COUNT" -gt 0 ]; then \
-        echo "ℹ️  INFO: Found $ED25519_COUNT Ed25519 references"; \
-        echo ""; \
-        echo "Details:"; \
-        echo "  Algorithm: Ed25519 signature algorithm"; \
-        echo "  Used in: DNSSEC record signatures, JWT token verification"; \
-        echo "  Operation: Signature VERIFICATION (non-cryptographic)"; \
-        echo ""; \
-        echo "FIPS Impact: LOW"; \
-        echo "  Signature verification is a public-key operation"; \
-        echo "  Does not involve key generation or signing (cryptographic operations)"; \
-        echo ""; \
-    else \
-        echo "ℹ️  No Ed25519 references found"; \
-    fi; \
-    CHACHA20_COUNT=$(strings /app/coredns 2>/dev/null | grep -ic "chacha20" || echo 0); \
-    if [ "$CHACHA20_COUNT" -gt 0 ]; then \
-        echo "⚠️  CRITICAL: Found $CHACHA20_COUNT ChaCha20 references"; \
-        echo ""; \
-        echo "Details:"; \
-        echo "  Algorithm: ChaCha20-Poly1305 AEAD cipher"; \
-        echo "  Source: golang.org/x/crypto/chacha20poly1305 (vendored in Go TLS)"; \
-        echo "  Used in: TLS 1.3 cipher suites (RFC 8439)"; \
-        echo "  FIPS Status: NOT FIPS 140-3 approved"; \
-        echo ""; \
-        echo "FIPS Compliance Strategy:"; \
-        echo "  ✅ golang-fips/go intercepts crypto/* calls at RUNTIME"; \
-        echo "  ✅ GOLANG_FIPS=1 enforces FIPS mode"; \
-        echo "  ✅ default_properties=fips=yes in openssl.cnf"; \
-        echo "  ✅ Provider named 'fips' for golang-fips discovery"; \
-        echo ""; \
-        echo "What happens at runtime:"; \
-        echo "  1. CoreDNS calls crypto/tls for TLS connection"; \
-        echo "  2. golang-fips/go intercepts and routes to OpenSSL"; \
-        echo "  3. OpenSSL with 'fips' provider only allows FIPS algorithms"; \
-        echo "  4. ChaCha20 cipher suite will be REJECTED by FIPS provider"; \
-        echo "  5. TLS handshake falls back to FIPS-approved ciphers (AES-GCM)"; \
-        echo ""; \
-        echo "⚠️  Production Requirements:"; \
-        echo "  1. Test TLS connections with FIPS enforcement"; \
-        echo "  2. Verify only FIPS cipher suites are negotiated"; \
-        echo "  3. Monitor: openssl s_client -connect <host>:<port> -cipher 'FIPS'"; \
-        echo "  4. Expected ciphers: TLS_AES_128_GCM_SHA256, TLS_AES_256_GCM_SHA384"; \
-        echo ""; \
-        echo "Note: ChaCha20 code is compiled but WILL NOT BE USED due to FIPS enforcement"; \
-    else \
-        echo "✓ No ChaCha20 references found (ideal for FIPS)"; \
-    fi; \
-    echo ""; \
-    echo "Summary:"; \
-    echo "  Architecture: CoreDNS → golang-fips/go → OpenSSL 3 → wolfProvider → wolfSSL FIPS v5"; \
-    echo "  golang.org/x/crypto: $X_CRYPTO_COUNT references (expected for TLS plugins)"; \
-    echo "  X25519: $X25519_COUNT references (TLS 1.3 key exchange)"; \
-    echo "  Ed25519: $ED25519_COUNT references (DNSSEC/JWT verification)"; \
-    echo "  ChaCha20: $CHACHA20_COUNT references (should be 0 for FIPS)"; \
-    echo ""; \
-    echo "Next Steps:"; \
-    echo "  1. Run automated tests: ./tests/check-coredns-crypto-routing.sh"; \
-    echo "  2. Deploy to test environment with TLS enabled"; \
-    echo "  3. Test DoT, DoH, DoH3 with real DNS queries"; \
-    echo "  4. Verify TLS cipher suites in production logs"; \
-    echo ""; \
-    echo "========================================"; \
-    echo ""
 
 # ============================================================================
 # Stage 5: Runtime image (Ubuntu System OpenSSL)

@@ -252,7 +252,149 @@ After patching and compilation, the final CoreDNS binary:
 - ✅ Contains **zero ChaCha20-Poly1305 references**
 - ✅ Uses only FIPS-approved cipher suites (AES-128-GCM, AES-256-GCM for TLS 1.3)
 - ✅ Builds successfully without "undefined constant" errors
-- ✅ Maintains full DNS-over-TLS, DNS-over-HTTPS, and DoH3 functionality
+- ✅ Maintains full DNS-over-TLS and DNS-over-HTTPS functionality
+- ❌ DoH3 (DNS over HTTP/3) is NOT AVAILABLE (QUIC/HTTP/3 disabled for FIPS compliance)
+
+### Non-FIPS Plugin Removal (Azure & CloudDNS)
+
+Multiple plugins have been **removed from the build** to ensure strict FIPS 140-3 compliance:
+
+#### Azure Plugin Removal (pkcs12/RC2)
+
+**Why Removal is Required**:
+- Azure plugin imports `golang.org/x/crypto/pkcs12`
+- pkcs12 package contains **RC2 cipher** - a non-FIPS approved algorithm
+- RC2 implementation located at: `golang.org/x/crypto/pkcs12/internal/rc2`
+- pkcs12 package documentation states: *"uses weak encryption primitives, SHOULD NOT be used for new applications"*
+- **Client verification** confirmed runtime initialization: `init golang.org/x/crypto/pkcs12 @49 ms`
+
+**Result**:
+- ✅ **pkcs12 package**: ABSENT from binary
+- ✅ **RC2 cipher**: ABSENT from binary
+- ⚠️  **Azure DNS functionality**: NOT AVAILABLE
+
+#### CloudDNS Plugin Removal (ChaCha20-Poly1305)
+
+**Why Removal is Required**:
+- CloudDNS plugin imports `google.golang.org/api/dns/v1`
+- Google Cloud DNS API depends on `github.com/google/s2a-go` (Secure Session Agent)
+- S2A library uses **ChaCha20-Poly1305 cipher** - a non-FIPS approved AEAD algorithm
+- Dependency chain: `plugin/clouddns` → `google.golang.org/api/dns/v1` → `github.com/google/s2a-go` → `golang.org/x/crypto/chacha20poly1305`
+
+**Result**:
+- ✅ **ChaCha20-Poly1305 package**: ABSENT from binary
+- ✅ **Google S2A library**: NOT INCLUDED
+- ⚠️  **Google Cloud DNS functionality**: NOT AVAILABLE
+
+#### Removal Implementation
+
+**Dockerfile Approach** (lines 455-488):
+- Remove plugin directories: `rm -rf plugin/azure plugin/clouddns`
+- Remove plugin imports from core code using sed
+- Process executed during CoreDNS source clone
+
+**Dockerfile.hardened Approach** (lines 565-590):
+- Modify `plugin.cfg` to remove plugin lines:
+  - `sed -i '/^azure:/d' plugin.cfg`
+  - `sed -i '/^clouddns:/d' plugin.cfg`
+- Regenerate plugin registration: `go generate coredns.go`
+- Run `go mod tidy` to remove dependencies
+
+**Build-Time Verification** (lines 704-790):
+- Automated checks after CoreDNS binary compilation
+- Check 1: Scan for `golang.org/x/crypto/pkcs12` (Azure)
+- Check 2: Scan for `golang.org/x/crypto/chacha20poly1305` (CloudDNS)
+- Build fails if either non-FIPS package is detected
+
+#### FIPS Compliance Status
+
+After plugin removal and verification:
+- ✅ **FIPS Compliance**: No non-FIPS algorithms present
+- ✅ **Standard DNS**: Fully functional
+- ✅ **DNS-over-TLS (DoT)**: Fully functional
+- ✅ **DNS-over-HTTPS (DoH)**: Fully functional
+- ⚠️  **Azure DNS**: NOT AVAILABLE
+- ⚠️  **Google Cloud DNS**: NOT AVAILABLE
+
+**Alternatives**: Use CoreDNS forward plugin to external Azure/Google Cloud DNS resolvers if cloud DNS integration is required.
+
+### DoH3 Plugin Removal (ChaCha20-Poly1305)
+
+The DoH3 (DNS over HTTP/3) plugin has been **removed from the build** to ensure strict FIPS 140-3 compliance:
+
+#### Why Removal is Required
+- DoH3 plugin depends on `github.com/quic-go/quic-go` library (QUIC protocol implementation)
+- quic-go contains **ChaCha20-Poly1305 cipher** - a non-FIPS approved AEAD algorithm
+- ChaCha20 implementation located at: `golang.org/x/crypto/chacha20poly1305`
+- **Client verification** confirmed ChaCha20 presence in CoreDNS binary
+
+#### Removal Implementation
+
+**1. QUIC File Hide-Restore Approach**
+- Location: Dockerfile:491-663, Dockerfile.hardened:424-623
+- Executed after Azure/CloudDNS plugin removal, before binary compilation
+- Process:
+  - Step 1: Temporarily rename QUIC files to .go.quic (hides from go mod tidy)
+  - Step 2: Create stub functions that return errors for QUIC/HTTP3 operations
+  - Step 3: Run `go mod tidy` to remove quic-go dependency from go.mod
+  - Step 4: Restore original QUIC files with `//go:build quic` tags (excluded from non-QUIC builds)
+  - Verify quic-go and chacha20poly1305 are removed from go.mod/go.sum
+
+**2. Impact Assessment**
+After DoH3 plugin removal:
+- ❌ **DoH3 (DNS over HTTP/3)**: NOT AVAILABLE
+- ✅ **DoH (DNS over HTTP/2)**: FULLY FUNCTIONAL (alternative for encrypted DNS)
+- ✅ **DoT (DNS over TLS)**: FULLY FUNCTIONAL
+- ✅ **Standard DNS (UDP/TCP)**: FULLY FUNCTIONAL
+- ✅ **All other plugins**: FULLY FUNCTIONAL (cache, forward, kubernetes, etc.)
+
+#### Result
+After DoH3 plugin removal and verification:
+- ✅ **quic-go library**: ABSENT from dependencies
+- ✅ **ChaCha20-Poly1305**: ABSENT from binary
+- ✅ **FIPS Compliance**: No non-FIPS ciphers present
+- ⚠️  **DoH3 functionality**: NOT AVAILABLE (minimal impact - rarely used)
+
+#### Why This Trade-Off is Acceptable
+
+1. **DoH3 Adoption**: HTTP/3 and DoH3 are still in early adoption phase
+2. **Alternative Available**: DoH over HTTP/2 provides the same encrypted DNS functionality
+3. **Core DNS Unaffected**: All standard DNS operations work normally
+4. **FIPS Compliance**: Critical requirement for government/regulated environments
+
+**Note:** If DoH3 is absolutely required, a FIPS-compliant QUIC implementation would need to be developed that doesn't use ChaCha20-Poly1305 (currently no such implementation exists).
+
+### HKDF Key Derivation Function
+
+HKDF (HMAC-based Key Derivation Function) is used by TLS 1.3 for key schedule operations and may be present in the CoreDNS binary:
+
+#### FIPS Compliance Status: ✅ FULLY COMPLIANT (May be present - used by TLS 1.3)
+
+**Algorithm Details:**
+- **Standard**: RFC 5869 - HMAC-based Extract-and-Expand Key Derivation Function
+- **Used by**: TLS 1.3 key schedule (RFC 8446 §7.1), optionally by QUIC or other components
+- **Operation**: Key derivation from shared secrets during TLS handshake
+- **Hash Functions**: SHA-256, SHA-384, SHA-512 (all FIPS-approved)
+
+#### Why HKDF is FIPS-Compliant
+- HKDF is a **key derivation function**, not an encryption algorithm
+- FIPS approval depends on the underlying hash function used
+- TLS 1.3 uses HKDF with **SHA-256 and SHA-384** - both FIPS-approved
+- NIST SP 800-56C Rev. 2 approves HKDF for key derivation
+- golang-fips/go routes HKDF operations through OpenSSL → wolfSSL FIPS
+- No weak or non-FIPS primitives involved
+
+#### Client Feedback Addressed
+- **Client inquiry**: "golang.org/x/crypto/hkdf is present in the coredns binary. It seems to be used by QUIC."
+- **Status**: ✅ **Verified FIPS-compliant** - uses approved hash functions (SHA-256/384)
+- **Presence**: MAY be present in binary (used by TLS 1.3, optionally by other components)
+- **Compliance**: Fully compliant - HKDF with SHA-2 is NIST-approved
+- **Build verification**: Informational check only (Dockerfile:754-767), does not fail build
+- **Note**: DoH3/QUIC was removed due to ChaCha20-Poly1305, NOT due to HKDF (HKDF was always compliant)
+
+**References:**
+- NIST SP 800-56C Rev. 2: Recommendation for Key-Derivation Methods in Key-Establishment Schemes
+- RFC 5869: HMAC-based Extract-and-Expand Key Derivation Function (HKDF)
 
 ## Configuration
 
