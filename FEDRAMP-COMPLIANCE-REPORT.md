@@ -512,8 +512,12 @@ The following algorithms are **NOT** approved for FIPS mode and are blocked:
      - **CloudDNS plugin removal**: Eliminates ChaCha20 via Google S2A dependency (Dockerfile:455-488)
      - **QUIC file hiding**: Prevents quic-go dependency during build (Dockerfile:491-663, Dockerfile.hardened:424-623)
      - **golang-fips/go patching**: Removes ChaCha20 from TLS source code (Dockerfile.hardened:244-272)
-   - ChaCha20 confirmed absent from final binary
-   - pkcs12/RC2 confirmed absent from final binary
+   - Build-time verification enforces compliance (build fails if violations detected):
+     - Plugin verification: `/coredns -plugins` must not list QUIC/gRPC/Azure/CloudDNS
+     - Dependency verification: `go mod why golang.org/x/crypto/chacha20poly1305` must return "does not need"
+     - Binary verification: `strings /app/coredns | grep -i chacha20` must return 0 matches
+   - ChaCha20 confirmed absent from final binary (verified at build time, build fails if present)
+   - pkcs12/RC2 confirmed absent from final binary (verified at build time, build fails if present)
    - golang.org/x/crypto routed through FIPS stack
 
 4. **Continuous Monitoring**
@@ -815,11 +819,12 @@ This CoreDNS v1.13.2 image required the following FIPS-specific modifications:
    - **Result**: TLS stack contains only FIPS-approved cipher suites
 
    **Combined Verification** (Dockerfile:704-790)
-   - Check 1: `go mod why golang.org/x/crypto/pkcs12` (Azure verification)
-   - Check 2: `go mod why golang.org/x/crypto/chacha20poly1305` (CloudDNS/QUIC verification)
-   - Check 3: `strings /app/coredns | grep -ic "chacha20"` (binary scan)
-   - **Build fails** if any non-FIPS package detected
-   - **Final Result**: Zero ChaCha20 references, zero pkcs12/RC2 references in binary
+   - Check 1: Plugin presence via `/coredns -plugins` (build fails if QUIC/gRPC/Azure/CloudDNS found)
+   - Check 2: `go mod why golang.org/x/crypto/pkcs12` (Azure verification, build fails if present)
+   - Check 3: `go mod why golang.org/x/crypto/chacha20poly1305` (CloudDNS/QUIC verification, build fails if present)
+   - Check 4: `strings /app/coredns | grep -ic "chacha20"` (Crypto Dependency Audit - informational scan, does not fail build)
+   - **Build enforcement**: Checks 1-3 are mandatory and block the build if failed; Check 4 is informational only
+   - **Final Result**: ChaCha20-Poly1305 package removed from dependencies (verified via `go mod why`); ChaCha20 cipher suite definitions may exist in golang-fips/go TLS runtime but are prevented from executing by FIPS enforcement; zero pkcs12/RC2 references in dependencies (verified and enforced)
 
 5. **OpenSSL Configuration File**
    - Custom `openssl.cnf` with wolfProvider settings

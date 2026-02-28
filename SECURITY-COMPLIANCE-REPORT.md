@@ -132,9 +132,11 @@ ChaCha20-Poly1305 is a **non-FIPS approved AEAD cipher** that was removed by eli
 - ❌ FIPS compliance **violated**
 
 **After DoH3 Removal:**
-- ✅ ChaCha20-Poly1305 **absent** from final binary (0 references)
-- ✅ quic-go dependency completely removed
-- ✅ FIPS compliance **achieved**
+- ✅ ChaCha20-Poly1305 **package absent** from dependencies (verified: `go mod why golang.org/x/crypto/chacha20poly1305` returns "does not need")
+- ✅ quic-go dependency completely removed (verified: `go mod why github.com/quic-go/quic-go` returns "does not need")
+- ✅ QUIC/HTTP3 plugins not in binary (verified: `/coredns -plugins` does not list quic or http3, build fails if found)
+- ✅ FIPS compliance **achieved** (build-time verification enforces dependency checks)
+- ℹ️  ChaCha20 code may exist in golang-fips/go TLS runtime (prevented from executing by FIPS mode enforcement)
 
 #### Implementation Details
 
@@ -192,9 +194,12 @@ ChaCha20-Poly1305 is a **non-FIPS approved AEAD cipher** that was removed by eli
 #### Compliance Verification
 
 **Build-Time Checks:**
-- Automated dependency verification after plugin removal
-- Build fails if quic-go or chacha20poly1305 remain in dependencies
-- Binary analysis confirms zero ChaCha20 presence
+- Automated dependency verification after plugin removal (via `go mod why`)
+- Build fails if quic-go or chacha20poly1305 packages remain in dependency tree
+- Plugin verification via `/coredns -plugins` output (build fails if QUIC/gRPC/Azure/CloudDNS found)
+- Binary string analysis via `strings /app/coredns | grep -i chacha20` (informational - Go runtime may contain TLS cipher definitions)
+- **Critical checks** (dependency + plugin removal) are enforced - builds cannot proceed if these fail
+- **Runtime enforcement** (GOLANG_FIPS=1) prevents execution of non-FIPS code even if present in binary
 
 **Runtime Verification:**
 - FIPS mode enforces AES-GCM cipher suites only
