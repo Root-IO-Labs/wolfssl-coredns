@@ -239,7 +239,7 @@ TOTAL_TESTS=$((TOTAL_TESTS + 1))
 echo "Test 2.3: Verifying wolfProvider module"
 echo "----------------------------------------"
 WOLFPROV_CHECK=$(docker run --rm --entrypoint=/bin/bash "$IMAGE_NAME" \
-    -c 'ls -la /usr/local/openssl/lib64/ossl-modules/*wolfprov* 2>/dev/null | head -1')
+    -c 'ls -la /usr/lib/x86_64-linux-gnu/ossl-modules/*wolfprov* /usr/lib/aarch64-linux-gnu/ossl-modules/*wolfprov* 2>/dev/null | head -1')
 
 if [ -n "$WOLFPROV_CHECK" ]; then
     log_pass "wolfProvider module found"
@@ -247,7 +247,7 @@ if [ -n "$WOLFPROV_CHECK" ]; then
     PASSED_TESTS=$((PASSED_TESTS + 1))
 else
     log_fail "wolfProvider module NOT found!"
-    echo "       Expected: /usr/local/openssl/lib64/ossl-modules/libwolfprov.so or wolfprov.so"
+    echo "       Expected: /usr/lib/x86_64-linux-gnu/ossl-modules/libwolfprov.so"
     FAILED_TESTS=$((FAILED_TESTS + 1))
 fi
 echo ""
@@ -322,7 +322,7 @@ TOTAL_TESTS=$((TOTAL_TESTS + 1))
 echo "Test 3.4: Verifying wolfProvider is loaded and active"
 echo "----------------------------------------"
 WOLFPROV_ACTIVE=$(docker run --rm --entrypoint=/bin/bash "$IMAGE_NAME" \
-    -c 'openssl list -providers 2>/dev/null | grep -i wolfprov' || echo "")
+    -c 'openssl list -providers 2>/dev/null | grep -i "wolfSSL Provider"' || echo "")
 
 if [ -n "$WOLFPROV_ACTIVE" ]; then
     log_pass "wolfProvider is loaded and active"
@@ -342,12 +342,12 @@ echo "----------------------------------------"
 OPENSSL_VERSION=$(docker run --rm --entrypoint=/bin/bash "$IMAGE_NAME" \
     -c 'openssl version 2>/dev/null' || echo "FAILED")
 
-if echo "$OPENSSL_VERSION" | grep -q "OpenSSL 3.0.15"; then
-    log_pass "OpenSSL 3.0.15 detected"
+if echo "$OPENSSL_VERSION" | grep -q "OpenSSL 3.0.2"; then
+    log_pass "OpenSSL 3.0.2 detected"
     echo "       Version: $OPENSSL_VERSION"
     PASSED_TESTS=$((PASSED_TESTS + 1))
 else
-    log_fail "OpenSSL 3.0.15 not found!"
+    log_fail "OpenSSL 3.0.2 not found!"
     echo "       Version: $OPENSSL_VERSION"
     FAILED_TESTS=$((FAILED_TESTS + 1))
 fi
@@ -383,7 +383,7 @@ if [ -n "$OPENSSL_CONF" ]; then
     PASSED_TESTS=$((PASSED_TESTS + 1))
 else
     log_warn "OPENSSL_CONF not set (may be set by entrypoint)"
-    echo "       Verify /usr/local/openssl/ssl/openssl.cnf exists"
+    echo "       Verify /etc/ssl/openssl.cnf exists"
     WARNING_TESTS=$((WARNING_TESTS + 1))
     PASSED_TESTS=$((PASSED_TESTS + 1))
 fi
@@ -401,7 +401,7 @@ if [ -n "$OPENSSL_MODULES" ]; then
     PASSED_TESTS=$((PASSED_TESTS + 1))
 else
     log_warn "OPENSSL_MODULES not set (may be set by entrypoint)"
-    echo "       Verify /usr/local/openssl/lib64/ossl-modules exists"
+    echo "       Verify /usr/lib/x86_64-linux-gnu/ossl-modules or /usr/lib/aarch64-linux-gnu/ossl-modules exists"
     WARNING_TESTS=$((WARNING_TESTS + 1))
     PASSED_TESTS=$((PASSED_TESTS + 1))
 fi

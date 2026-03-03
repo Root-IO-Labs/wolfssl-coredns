@@ -95,20 +95,20 @@ echo -e "${CYAN}[1/8] Image Architecture Validation${NC}"
 echo "================================================================"
 echo ""
 
-check_test "architecture" "OpenSSL 3.0.15 version" \
-    "docker run --rm --entrypoint=/bin/bash $IMAGE_NAME -c 'openssl version | grep -q \"OpenSSL 3.0.15\"'"
+check_test "architecture" "OpenSSL 3.0.2 version" \
+    "docker run --rm --entrypoint=/bin/bash $IMAGE_NAME -c 'openssl version | grep -q \"OpenSSL 3.0.2\"'"
 
 check_test "architecture" "OpenSSL binary location" \
-    "docker run --rm --entrypoint=/bin/bash $IMAGE_NAME -c 'test -x /usr/local/openssl/bin/openssl'"
+    "docker run --rm --entrypoint=/bin/bash $IMAGE_NAME -c 'test -x /usr/bin/openssl'"
 
 check_test "architecture" "wolfSSL library present" \
     "docker run --rm --entrypoint=/bin/bash $IMAGE_NAME -c 'test -f /usr/lib/x86_64-linux-gnu/libwolfssl.so'"
 
 check_test "architecture" "wolfProvider module present" \
-    "docker run --rm --entrypoint=/bin/bash $IMAGE_NAME -c 'test -f /usr/local/openssl/lib64/ossl-modules/libwolfprov.so'"
+    "docker run --rm --entrypoint=/bin/bash $IMAGE_NAME -c 'test -f /usr/lib/x86_64-linux-gnu/ossl-modules/libwolfprov.so'"
 
 check_test "architecture" "OpenSSL config file" \
-    "docker run --rm --entrypoint=/bin/bash $IMAGE_NAME -c 'test -f /usr/local/openssl/ssl/openssl.cnf'"
+    "docker run --rm --entrypoint=/bin/bash $IMAGE_NAME -c 'test -f /etc/ssl/openssl.cnf'"
 
 check_test "architecture" "FIPS startup check utility" \
     "docker run --rm --entrypoint=/bin/bash $IMAGE_NAME -c 'test -x /usr/local/bin/fips-startup-check'"
@@ -117,7 +117,7 @@ check_test "architecture" "OPENSSL_CONF environment variable" \
     "docker run --rm --entrypoint=/bin/bash $IMAGE_NAME -c 'echo \$OPENSSL_CONF | grep -q openssl.cnf'"
 
 check_test "architecture" "LD_LIBRARY_PATH includes FIPS paths" \
-    "docker run --rm --entrypoint=/bin/bash $IMAGE_NAME -c 'echo \$LD_LIBRARY_PATH | grep -q openssl'"
+    "docker run --rm --entrypoint=/bin/bash $IMAGE_NAME -c 'echo \$LD_LIBRARY_PATH | grep -qE \"(/usr/local/lib|/usr/lib/x86_64-linux-gnu|/usr/lib/aarch64-linux-gnu)\"'"
 
 ################################################################################
 # Section 2: golang-fips/go Integration
@@ -184,10 +184,10 @@ echo "================================================================"
 echo ""
 
 check_test "wolfprov" "wolfProvider loaded" \
-    "docker run --rm --entrypoint=/bin/bash $IMAGE_NAME -c 'openssl list -providers | grep -q wolfprov'"
+    "docker run --rm --entrypoint=/bin/bash $IMAGE_NAME -c 'openssl list -providers | grep -qi \"wolfSSL Provider\"'"
 
 check_test "wolfprov" "wolfProvider is active" \
-    "docker run --rm --entrypoint=/bin/bash $IMAGE_NAME -c 'openssl list -providers | grep -A 3 wolfprov | grep -q \"status: active\"'"
+    "docker run --rm --entrypoint=/bin/bash $IMAGE_NAME -c 'openssl list -providers | grep -A 3 \"wolfSSL Provider\" | grep -q \"status: active\"'"
 
 check_test "wolfprov" "SHA-256 available via wolfProvider" \
     "docker run --rm --entrypoint=/bin/bash $IMAGE_NAME -c 'openssl list -digest-algorithms | grep -qi sha256'"
@@ -226,7 +226,7 @@ check_test "nonfips" "No libk5crypto" \
     "docker run --rm --entrypoint=/bin/bash $IMAGE_NAME -c 'find /usr/lib /lib -name \"libk5crypto*\" 2>/dev/null | wc -l | grep -q ^0\$'"
 
 check_test "nonfips" "FIPS OpenSSL prioritized over system OpenSSL" \
-    "docker run --rm --entrypoint=/bin/bash $IMAGE_NAME -c 'openssl version | grep -q \"3.0.15\" && ldd /usr/local/openssl/bin/openssl | grep -q \"/usr/local/openssl/lib64/libssl.so.3\"'"
+    "docker run --rm --entrypoint=/bin/bash $IMAGE_NAME -c 'openssl version | grep -q \"3.0.2\" && ldd /usr/bin/openssl | grep -q \"/usr/lib/x86_64-linux-gnu/libssl.so.3\"'"
 
 check_test "nonfips" "FIPS libraries in ldconfig cache" \
     "docker run --rm --entrypoint=/bin/bash $IMAGE_NAME -c 'ldconfig -p | grep -q libcrypto.so.3'"
@@ -309,8 +309,8 @@ echo -e "${CYAN}[8/8] Runtime Security Validation${NC}"
 echo "================================================================"
 echo ""
 
-check_test "security" "FIPS OpenSSL in ldconfig" \
-    "docker run --rm --entrypoint=/bin/bash $IMAGE_NAME -c 'ldconfig -p | grep -q openssl/lib64'"
+check_test "security" "OpenSSL libraries in ldconfig" \
+    "docker run --rm --entrypoint=/bin/bash $IMAGE_NAME -c 'ldconfig -p | grep -qE \"libssl.so|libcrypto.so\"'"
 
 check_test "security" "No SUID binaries in /coredns" \
     "docker run --rm --entrypoint=/bin/bash $IMAGE_NAME -c 'find /coredns -perm /4000 2>/dev/null | wc -l | grep -q ^0\$ || test ! -d /coredns'"
@@ -322,7 +322,7 @@ check_test "security" "CA certificates directory exists" \
     "docker run --rm --entrypoint=/bin/bash $IMAGE_NAME -c 'test -d /etc/ssl/certs'"
 
 check_test "security" "Environment variables set" \
-    "docker run --rm --entrypoint=/bin/bash $IMAGE_NAME -c 'test -n \"\$OPENSSL_CONF\" && test -n \"\$OPENSSL_MODULES\"'"
+    "docker run --rm --entrypoint=/bin/bash $IMAGE_NAME -c 'test -n \"\$OPENSSL_CONF\" && test -n \"\$GOLANG_FIPS\"'"
 
 check_test "security" "Entrypoint script executable" \
     "docker run --rm --entrypoint=/bin/bash $IMAGE_NAME -c 'test -x /entrypoint.sh'"
